@@ -727,18 +727,12 @@ class OmnipodErosPumpPlugin @Inject constructor(
     override fun timezoneOrDSTChanged(timeChangeType: TimeChangeType) {
         aapsLogger.info(LTag.PUMP, "Time, Date and/or TimeZone changed. [changeType=" + timeChangeType.name + ", eventHandlingEnabled=" + aapsOmnipodErosManager.isTimeChangeEventEnabled + "]")
 
-        val now = Instant.now()
-        if (timeChangeType == TimeChangeType.TimeChanged && now.isBefore(lastTimeDateOrTimeZoneUpdate.plus(Duration.standardDays(1L)))) {
-            aapsLogger.info(LTag.PUMP, "Ignoring time change because not a TZ or DST time change and the last one happened less than 24 hours ago.")
-            return
-        }
         if (!podStateManager.isPodRunning) {
             aapsLogger.info(LTag.PUMP, "Ignoring time change because no Pod is active")
             return
         }
 
         aapsLogger.info(LTag.PUMP, "DST and/or TimeZone changed event will be consumed by driver")
-        lastTimeDateOrTimeZoneUpdate = now
         hasTimeDateOrTimeZoneChanged = true
     }
 
