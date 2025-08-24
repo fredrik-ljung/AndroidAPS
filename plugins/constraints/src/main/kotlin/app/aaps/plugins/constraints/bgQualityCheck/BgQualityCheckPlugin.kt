@@ -77,7 +77,7 @@ class BgQualityCheckPlugin @Inject constructor(
         for (i in readings.indices)
         // Deltas are calculated from last ~50 min. Detect RED state only on this interval
             if (i < min(readings.size - 2, 10))
-                if (abs(readings[i].timestamp - readings[i + 1].timestamp) <= T.secs(20).msecs()) {
+                if (abs(readings[i].timestamp - readings[i + 1].timestamp) <= T.secs(5).msecs()) {
                     state = BgQualityCheck.State.DOUBLED
                     aapsLogger.debug(LTag.CORE, "BG similar. Turning on red state.\n${readings[i]}\n${readings[i + 1]}")
                     message = rh.gs(R.string.bg_too_close, dateUtil.dateAndTimeAndSecondsString(readings[i].timestamp), dateUtil.dateAndTimeAndSecondsString(readings[i + 1].timestamp))
