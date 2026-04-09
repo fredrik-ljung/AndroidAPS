@@ -26,11 +26,9 @@ import androidx.compose.ui.res.stringResource
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.interfaces.automation.Automation
 import app.aaps.core.interfaces.autotune.Autotune
-import app.aaps.core.interfaces.maintenance.Maintenance
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.resources.ResourceHelper
-import app.aaps.core.interfaces.smsCommunicator.SmsCommunicator
 import app.aaps.core.ui.compose.AapsTopAppBar
 import app.aaps.core.ui.compose.ComposeScreenContent
 import app.aaps.core.ui.compose.LocalConfig
@@ -67,10 +65,8 @@ fun AllPreferencesScreen(
     val preferences = LocalPreferences.current
     val config = LocalConfig.current
     // Look up plugins by interface
-    val smsCommunicatorPlugin = activePlugin.getSpecificPluginsListByInterface(SmsCommunicator::class.java).firstOrNull()
     val automationPlugin = activePlugin.getSpecificPluginsListByInterface(Automation::class.java).firstOrNull()
     val autotunePlugin = activePlugin.getSpecificPluginsListByInterface(Autotune::class.java).firstOrNull()
-    val maintenancePlugin = activePlugin.getSpecificPluginsListByInterface(Maintenance::class.java).firstOrNull()
 
     // Built-in preference screens from BuiltInSearchables (single source of truth)
     val generalPreferences = builtInSearchables.general
@@ -78,6 +74,7 @@ fun AllPreferencesScreen(
     val protectionPreferences = builtInSearchables.protection
     val pumpPreferences = builtInSearchables.pump
     val alertsPreferences = builtInSearchables.alerts
+    val maintenancePreferences = builtInSearchables.maintenance
 
     // Helper function to get preference content if plugin is enabled
     fun getPreferenceContentIfEnabled(plugin: PluginBase?, enabledCondition: Boolean = true): Any? {
@@ -114,7 +111,7 @@ fun AllPreferencesScreen(
         }
 
         // 5. APS plugin (enabled only if APS is configured)
-        getPreferenceContentIfEnabled(activePlugin.activeAPS as PluginBase, config.APS)?.let { add(it) }
+        (activePlugin.activeAPS as? PluginBase)?.let { getPreferenceContentIfEnabled(it, config.APS)?.let { pref -> add(pref) } }
 
         // 6. Sensitivity plugin
         getPreferenceContentIfEnabled(activePlugin.activeSensitivity as PluginBase)?.let { add(it) }
@@ -126,9 +123,6 @@ fun AllPreferencesScreen(
         activePlugin.getSpecificPluginsList(PluginType.SYNC).forEach { plugin ->
             getPreferenceContentIfEnabled(plugin)?.let { add(it) }
         }
-
-        // 10. SMS Communicator plugin (found via interface)
-        getPreferenceContentIfEnabled(smsCommunicatorPlugin)?.let { add(it) }
 
         // 11. Automation plugin (found via interface)
         getPreferenceContentIfEnabled(automationPlugin)?.let { add(it) }
@@ -202,10 +196,8 @@ fun AllPreferencesScreen(
                     // Built-in: Alerts settings
                     addPreferenceContent(alertsPreferences, sectionState)
 
-                    // Maintenance plugin (found via interface, always last)
-                    getPreferenceContentIfEnabled(maintenancePlugin)?.let { content ->
-                        addPreferenceContent(content, sectionState)
-                    }
+                    // Built-in: Maintenance settings (always last)
+                    addPreferenceContent(maintenancePreferences, sectionState)
                 }
             }
         }
