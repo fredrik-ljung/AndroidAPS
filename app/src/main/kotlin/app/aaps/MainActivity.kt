@@ -4,8 +4,6 @@ import android.content.Intent
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.PersistableBundle
-import android.text.SpannableString
-import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
 import android.view.Menu
 import android.view.MenuInflater
@@ -23,7 +21,6 @@ import androidx.core.view.GravityCompat
 import androidx.core.view.MenuCompat
 import androidx.core.view.MenuProvider
 import app.aaps.activities.HistoryBrowseActivity
-import app.aaps.activities.PreferencesActivity
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.configuration.ConfigBuilder
@@ -38,15 +35,11 @@ import app.aaps.core.interfaces.rx.events.EventRebuildTabs
 import app.aaps.core.interfaces.smsCommunicator.SmsCommunicator
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.BooleanKey
-import app.aaps.core.keys.BooleanNonKey
-import app.aaps.core.keys.StringKey
 import app.aaps.core.ui.UIRunnable
 import app.aaps.core.ui.locale.LocaleHelper
-import app.aaps.core.utils.isRunningRealPumpTest
 import app.aaps.databinding.ActivityMainBinding
 import app.aaps.plugins.configuration.activities.DaggerAppCompatActivityWithResult
 import app.aaps.plugins.configuration.activities.SingleFragmentActivity
-import app.aaps.plugins.configuration.setupwizard.SetupWizardActivity
 import app.aaps.ui.tabs.TabPageAdapter
 import com.google.android.material.tabs.TabLayoutMediator
 import com.joanzapata.iconify.Iconify
@@ -81,7 +74,6 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
     @Inject lateinit var notificationManager: NotificationManager
 
     private lateinit var actionBarDrawerToggle: ActionBarDrawerToggle
-    private var pluginPreferencesMenuItem: MenuItem? = null
     private var menu: Menu? = null
     private var menuOpen = false
     private var isProtectionCheckActive = false
@@ -117,7 +109,6 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
         val newScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
         scope = newScope
         preferences.observe(BooleanKey.OverviewKeepScreenOn).drop(1).onEach { setWakeLock() }.launchIn(newScope)
-        preferences.observe(StringKey.GeneralSkin).drop(1).onEach { recreate() }.launchIn(newScope)
         disposable += rxBus
             .toObservable(EventAppInitialized::class.java)
             .observeOn(aapsSchedulers.main)
@@ -141,40 +132,16 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
                 MenuCompat.setGroupDividerEnabled(menu, true)
                 this@MainActivity.menu = menu
                 menuInflater.inflate(R.menu.menu_main, menu)
-                pluginPreferencesMenuItem = menu.findItem(R.id.nav_plugin_preferences)
             }
 
             override fun onMenuItemSelected(menuItem: MenuItem): Boolean =
                 when (menuItem.itemId) {
-                    R.id.nav_preferences        -> {
-                        protectionCheck.queryProtection(this@MainActivity, ProtectionCheck.Protection.PREFERENCES, {
-                            startActivity(
-                                Intent(this@MainActivity, PreferencesActivity::class.java)
-                                    .setAction("info.nightscout.androidaps.MainActivity")
-                            )
-                        })
-                        true
-                    }
-
-                    R.id.nav_historybrowser     -> {
+                    R.id.nav_historybrowser -> {
                         startActivity(Intent(this@MainActivity, HistoryBrowseActivity::class.java).setAction("info.nightscout.androidaps.MainActivity"))
                         true
                     }
 
-                    R.id.nav_setupwizard        -> {
-                        protectionCheck.queryProtection(this@MainActivity, ProtectionCheck.Protection.PREFERENCES, {
-                            startActivity(Intent(this@MainActivity, SetupWizardActivity::class.java).setAction("info.nightscout.androidaps.MainActivity"))
-                        })
-                        true
-                    }
-
-                    R.id.nav_plugin_preferences -> {
-                        val plugin = (binding.mainPager.adapter as TabPageAdapter).getPluginAt(binding.mainPager.currentItem)
-                        uiInteraction.runPreferencesForPlugin(this@MainActivity, plugin.javaClass.simpleName)
-                        true
-                    }
-
-                    else                        ->
+                    else                    ->
                         actionBarDrawerToggle.onOptionsItemSelected(menuItem)
                 }
         }
@@ -187,16 +154,7 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
     private fun start() {
         binding.splash.visibility = View.GONE
         setupViews()
-
-        if (startWizard() && !isRunningRealPumpTest()) {
-            protectionCheck.queryProtection(this, ProtectionCheck.Protection.PREFERENCES, {
-                startActivity(Intent(this, SetupWizardActivity::class.java).setAction("info.nightscout.androidaps.MainActivity"))
-            })
-        }
     }
-
-    private fun startWizard(): Boolean =
-        !preferences.get(BooleanNonKey.GeneralSetupWizardProcessed)
 
     override fun onPostCreate(savedInstanceState: Bundle?, persistentState: PersistableBundle?) {
         super.onPostCreate(savedInstanceState, persistentState)
@@ -250,8 +208,7 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
                 ) {
                     val menuItem = menu.add(p.name)
                     menuItem.isCheckable = true
-                    if (p.menuIcon != -1) menuItem.setIcon(p.menuIcon)
-                    else menuItem.setIcon(app.aaps.core.ui.R.drawable.ic_settings)
+                    menuItem.setIcon(app.aaps.core.ui.R.drawable.ic_settings)
                     menuItem.setOnMenuItemClickListener {
                         startActivity(
                             Intent(this, SingleFragmentActivity::class.java)
@@ -307,18 +264,7 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
         if (binding.mainDrawerLayout.isDrawerOpen(GravityCompat.START)) {
             binding.mainDrawerLayout.closeDrawers()
         }
-        val result = super.onMenuOpened(featureId, menu)
-        if (binding.mainPager.currentItem >= 0) {
-            val plugin = (binding.mainPager.adapter as TabPageAdapter?)?.getPluginAt(binding.mainPager.currentItem) ?: return result
-            this.menu?.findItem(R.id.nav_plugin_preferences)?.title = rh.gs(R.string.nav_preferences_plugin, plugin.name)
-            pluginPreferencesMenuItem?.isEnabled = (binding.mainPager.adapter as TabPageAdapter).getPluginAt(binding.mainPager.currentItem).preferencesId != PluginDescription.PREFERENCE_NONE
-        }
-        if (pluginPreferencesMenuItem?.isEnabled == false) {
-            val spanString = SpannableString(this.menu?.findItem(R.id.nav_plugin_preferences)?.title.toString())
-            spanString.setSpan(ForegroundColorSpan(rh.gac(app.aaps.core.ui.R.attr.disabledTextColor)), 0, spanString.length, 0)
-            this.menu?.findItem(R.id.nav_plugin_preferences)?.title = spanString
-        }
-        return result
+        return super.onMenuOpened(featureId, menu)
     }
 
     override fun onPanelClosed(featureId: Int, menu: Menu) {

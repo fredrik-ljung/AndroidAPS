@@ -38,11 +38,6 @@ class PluginDescriptionTest {
         assertThat(pluginDescription.showInList.invoke()).isFalse()
     }
 
-    @Test fun pluginIcon() {
-        val pluginDescription = PluginDescription().pluginIcon(10)
-        assertThat(pluginDescription.pluginIcon.toLong()).isEqualTo(10)
-    }
-
     @Test fun pluginName() {
         val pluginDescription = PluginDescription().pluginName(10)
         assertThat(pluginDescription.pluginName.toLong()).isEqualTo(10)
@@ -51,11 +46,6 @@ class PluginDescriptionTest {
     @Test fun shortNameTest() {
         val pluginDescription = PluginDescription().shortName(10)
         assertThat(pluginDescription.shortName.toLong()).isEqualTo(10)
-    }
-
-    @Test fun preferencesIdTest() {
-        val pluginDescription = PluginDescription().preferencesId(10)
-        assertThat(pluginDescription.preferencesId.toLong()).isEqualTo(10)
     }
 
     @Test fun enableByDefault() {

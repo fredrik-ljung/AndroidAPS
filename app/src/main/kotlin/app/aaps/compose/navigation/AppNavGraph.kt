@@ -25,6 +25,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraphBuilder
@@ -37,11 +38,15 @@ import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.maintenance.FileListProvider
 import app.aaps.core.interfaces.plugin.ActivePlugin
+import app.aaps.core.interfaces.plugin.PermissionGroup
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.protection.ProtectionCheck
 import app.aaps.core.interfaces.resources.ResourceHelper
+import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.keys.BooleanKey
+import app.aaps.core.keys.BooleanNonKey
 import app.aaps.core.keys.IntKey
+import app.aaps.core.keys.StringKey
 import app.aaps.core.keys.interfaces.PreferenceVisibilityContext
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.ui.compose.AapsTopAppBar
@@ -54,6 +59,8 @@ import app.aaps.core.ui.compose.navigation.NavigationRequest
 import app.aaps.core.ui.compose.preference.PluginPreferencesScreen
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
 import app.aaps.core.ui.compose.siteRotation.SiteLocationPickerScreen
+import app.aaps.plugins.configuration.setupwizard.SWDefinition
+import app.aaps.plugins.configuration.setupwizard.SetupWizardScreen
 import app.aaps.ui.compose.calibrationDialog.CalibrationDialogScreen
 import app.aaps.ui.compose.carbsDialog.CarbsDialogScreen
 import app.aaps.ui.compose.careDialog.CareDialogScreen
@@ -130,6 +137,8 @@ fun NavGraphBuilder.appNavGraph(
     siteRotationManagementViewModel: SiteRotationManagementViewModel,
     graphViewModel: app.aaps.ui.compose.overview.graphs.GraphViewModel,
     // Dependencies
+    swDefinition: SWDefinition,
+    rxBus: RxBus,
     activePlugin: ActivePlugin,
     preferences: Preferences,
     rh: ResourceHelper,
@@ -144,6 +153,8 @@ fun NavGraphBuilder.appNavGraph(
     requestEditModeAuthorization: (onGranted: () -> Unit) -> Unit,
     onRefreshPermissions: () -> Unit,
     onExecuteQuickWizard: (guid: String) -> Unit,
+    onRequestDirectoryAccess: () -> Unit,
+    onRequestPermission: (PermissionGroup) -> Unit,
     findScreenDef: (key: String) -> PreferenceSubScreenDef?,
 ) {
     composable(
@@ -475,7 +486,7 @@ fun NavGraphBuilder.appNavGraph(
     }
 
     composable(AppRoute.QuickLaunchConfig.route) {
-        val quickLaunchConfigViewModel: QuickLaunchConfigViewModel = androidx.hilt.navigation.compose.hiltViewModel()
+        val quickLaunchConfigViewModel: QuickLaunchConfigViewModel = hiltViewModel()
         QuickLauchConfigScreen(
             viewModel = quickLaunchConfigViewModel,
             onNavigateBack = { navController.safePopBackStack() }
@@ -557,7 +568,7 @@ fun NavGraphBuilder.appNavGraph(
     }
 
     composable(AppRoute.FoodManagement.route) {
-        val foodManagementViewModel: app.aaps.ui.compose.foodManagement.FoodManagementViewModel = androidx.hilt.navigation.compose.hiltViewModel()
+        val foodManagementViewModel: app.aaps.ui.compose.foodManagement.FoodManagementViewModel = hiltViewModel()
         app.aaps.ui.compose.foodManagement.FoodManagementScreen(
             viewModel = foodManagementViewModel,
             onNavigateBack = { navController.safePopBackStack() },
@@ -583,6 +594,33 @@ fun NavGraphBuilder.appNavGraph(
         SiteRotationSettingsScreen(
             viewModel = siteRotationManagementViewModel,
             onNavigateBack = { navController.safePopBackStack() }
+        )
+    }
+
+    composable(AppRoute.SetupWizard.route) {
+        SetupWizardScreen(
+            swDefinition = swDefinition,
+            onFinish = {
+                preferences.put(BooleanNonKey.GeneralSetupWizardProcessed, true)
+                navController.safePopBackStack()
+            },
+            onBack = { navController.safePopBackStack() },
+            onImportSettings = { navController.navigate(AppRoute.ImportSettings.createRoute("LOCAL")) },
+            onPluginPreferences = { pluginId -> navController.navigate(AppRoute.PluginPreferences.createRoute(pluginId)) },
+            onSetMasterPassword = { navController.navigate(AppRoute.PreferenceScreen.createRoute("protection", StringKey.ProtectionMasterPassword.key)) },
+            onManageInsulin = { navController.navigate(AppRoute.InsulinManagement.createRoute()) },
+            onManageProfile = { navController.navigate(AppRoute.Profile.createRoute()) },
+            onProfileSwitch = { navController.navigate(AppRoute.ProfileActivation.createRoute(0)) },
+            onRequestDirectoryAccess = onRequestDirectoryAccess,
+            onRequestPermission = onRequestPermission,
+            permissionItems = {
+                val allGroups = activePlugin.collectAllPermissions(navController.context)
+                val missingGroups = activePlugin.collectMissingPermissions(navController.context)
+                val missingSets = missingGroups.map { it.permissions.toSet() }.toSet()
+                allGroups.map { group -> group to (group.permissions.toSet() !in missingSets) }
+            },
+            isDirectoryAccessGranted = { prefFileList.isDirectoryAccessGranted() },
+            rxBus = rxBus
         )
     }
 }

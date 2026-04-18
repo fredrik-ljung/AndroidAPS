@@ -392,7 +392,7 @@ class BolusWizard @Inject constructor(
         return actions.joinToString("<br/>")
     }
 
-    suspend fun confirmAndExecute(ctx: Context, quickWizardEntry: QuickWizardEntry? = null) {
+    fun confirmAndExecute(ctx: Context, quickWizardEntry: QuickWizardEntry? = null) {
         if (calculatedTotalInsulin > 0.0 || carbs > 0.0) {
             if (accepted) {
                 aapsLogger.debug(LTag.UI, "guarding: already accepted")
@@ -542,12 +542,16 @@ class BolusWizard @Inject constructor(
                             )
                         )
                         quickWizardEntry?.markAsUsed()
+                        // Schedule carb timer before bolus delivery. Scheduling in the bolus
+                        // completion callback fails when the screen is off because Android
+                        // blocks startActivity() from the background.
+                        if (useAlarm && carbs > 0 && carbTime > 0) {
+                            automation.scheduleTimeToEatReminder(T.mins(carbTime.toLong()).secs().toInt())
+                        }
                         commandQueue.bolus(this, object : Callback() {
                             override fun run() {
                                 if (!result.success) {
                                     uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
-                                } else if (useAlarm && carbs > 0 && carbTime > 0) {
-                                    automation.scheduleTimeToEatReminder(T.mins(carbTime.toLong()).secs().toInt())
                                 }
                             }
                         })
@@ -556,12 +560,12 @@ class BolusWizard @Inject constructor(
                 }
             }
             if (quickWizardEntry != null) {
-                scheduleECarbsFromQuickWizard(ctx, quickWizardEntry)
+                scheduleECarbsFromQuickWizard(quickWizardEntry)
             }
         })
     }
 
-    private fun scheduleECarbsFromQuickWizard(ctx: Context, quickWizardEntry: QuickWizardEntry) {
+    private fun scheduleECarbsFromQuickWizard(quickWizardEntry: QuickWizardEntry) {
         val eCarbsYesNo = JsonHelper.safeGetInt(quickWizardEntry.storage, "useEcarbs", QuickWizardEntry.NO)
         if (eCarbsYesNo == QuickWizardEntry.YES) {
             val timeOffset = JsonHelper.safeGetInt(quickWizardEntry.storage, "time", 0)
@@ -767,12 +771,16 @@ class BolusWizard @Inject constructor(
                         )
                     )
                     quickWizardEntry?.markAsUsed()
+                    // Schedule carb timer before bolus delivery. Scheduling in the bolus
+                    // completion callback fails when the screen is off because Android
+                    // blocks startActivity() from the background.
+                    if (useAlarm && carbs > 0 && this@BolusWizard.carbTime > 0) {
+                        automation.scheduleTimeToEatReminder(T.mins(this@BolusWizard.carbTime.toLong()).secs().toInt())
+                    }
                     commandQueue.bolus(this, object : Callback() {
                         override fun run() {
                             if (!result.success) {
                                 onError(result.comment)
-                            } else if (useAlarm && carbs > 0 && this@BolusWizard.carbTime > 0) {
-                                automation.scheduleTimeToEatReminder(T.mins(this@BolusWizard.carbTime.toLong()).secs().toInt())
                             }
                         }
                     })

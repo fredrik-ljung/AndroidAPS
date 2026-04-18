@@ -8,6 +8,7 @@ import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.db.observeChanges
 import android.content.Context
+import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.insulin.ConcentrationHelper
 import app.aaps.core.interfaces.pump.PumpRate
 import app.aaps.core.interfaces.pump.PumpSync
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.runBlocking
+import app.aaps.core.ui.R as CoreUiR
 
 class VirtualPumpViewModel(
     private val virtualPumpPlugin: VirtualPumpPlugin,
@@ -94,11 +96,25 @@ class VirtualPumpViewModel(
 
         val tempBasalText = profile?.let {
             runBlocking { persistenceLayer.getTemporaryBasalActiveAt(now) }
-                ?.toStringFull(it, dateUtil, rh)
+                ?.let { tempBasal ->
+                    ch.basalTbrString(
+                        rate = PumpRate(tempBasal.rate),
+                        startTime = tempBasal.timestamp,
+                        durationInMin = T.msecs(tempBasal.duration).mins().toInt(),
+                        isAbsolute = tempBasal.isAbsolute
+                    )
+                }
         } ?: ""
 
         val extendedBolusText = runBlocking { persistenceLayer.getExtendedBolusActiveAt(now) }
-            ?.toStringFull(dateUtil, rh) ?: ""
+            ?.let {
+                ch.basalTbrString(
+                    rate = PumpRate(it.rate),
+                    startTime = it.timestamp,
+                    durationInMin = T.msecs(it.duration).mins().toInt(),
+                    isExtended = true
+                )
+            } ?: ""
 
         // Format values for the shared builder
         val lastConnection = virtualPumpPlugin.lastDataTime.value.takeIf { it != 0L }
@@ -106,7 +122,7 @@ class VirtualPumpViewModel(
 
         val lastBolus = virtualPumpPlugin.lastBolusAmount.value?.let { amount ->
             virtualPumpPlugin.lastBolusTime.value?.takeIf { it != 0L }?.let { time ->
-                ch.insulinAmountAgoString(amount, dateUtil.sinceString(time, rh))
+                ch.insulinAmountAgoString(amount, time)
             }
         }
 
@@ -115,7 +131,7 @@ class VirtualPumpViewModel(
         }
 
         val battery = virtualPumpPlugin.batteryLevel.value?.let { level ->
-            rh.gs(app.aaps.core.ui.R.string.format_percent, level)
+            rh.gs(CoreUiR.string.format_percent, level)
         }
 
         val reservoir = ch.insulinAmountString(virtualPumpPlugin.reservoirLevel.value)
@@ -152,15 +168,15 @@ class VirtualPumpViewModel(
 
         val managementActions = listOf(
             PumpAction(
-                label = rh.gs(app.aaps.core.ui.R.string.pump_suspend),
-                iconRes = app.aaps.core.ui.R.drawable.ic_loop_paused,
+                label = rh.gs(CoreUiR.string.pump_suspend),
+                iconRes = CoreUiR.drawable.ic_loop_paused,
                 category = ActionCategory.MANAGEMENT,
                 visible = !isSuspended,
                 onClick = { onSuspendToggle(true) }
             ),
             PumpAction(
-                label = rh.gs(app.aaps.core.ui.R.string.pump_resume),
-                iconRes = app.aaps.core.ui.R.drawable.ic_loop_resume,
+                label = rh.gs(CoreUiR.string.pump_resume),
+                iconRes = CoreUiR.drawable.ic_loop_resume,
                 category = ActionCategory.MANAGEMENT,
                 visible = isSuspended,
                 onClick = { onSuspendToggle(false) }
