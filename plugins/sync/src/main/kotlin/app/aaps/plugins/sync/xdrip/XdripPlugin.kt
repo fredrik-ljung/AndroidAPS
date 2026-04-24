@@ -31,6 +31,7 @@ import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventAppExit
 import app.aaps.core.interfaces.rx.events.EventAppInitialized
 import app.aaps.core.interfaces.rx.events.EventAutosensCalculationFinished
+import app.aaps.core.interfaces.rx.events.EventShowSnackbar
 import app.aaps.core.interfaces.sync.DataSyncSelector
 import app.aaps.core.interfaces.sync.DataSyncSelectorXdrip
 import app.aaps.core.interfaces.sync.Sync
@@ -45,7 +46,6 @@ import app.aaps.core.objects.extensions.round
 import app.aaps.core.objects.extensions.toStringShort
 import app.aaps.core.ui.compose.icons.IcXDrip
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
-import app.aaps.core.ui.toast.ToastUtils
 import app.aaps.plugins.sync.R
 import app.aaps.plugins.sync.nsclient.extensions.toJson
 import app.aaps.plugins.sync.xdrip.compose.XdripComposeContent
@@ -229,7 +229,7 @@ class XdripPlugin @Inject constructor(
                 .append("|")
                 .append(decimalFormatter.to2Decimal(basalIob.basaliob))
                 .append(")")
-        if (preferences.get(BooleanKey.XdripSendBgi) && glucoseStatusProvider.glucoseStatusData != null) {
+        if (preferences.get(BooleanKey.XdripSendBgi) && glucoseStatusProvider.glucoseStatusData != null && loop.lastRun != null) {
             val bgi = -(bolusIob.activity + basalIob.activity) * 5 * profileUtil.fromMgdlToUnits(profile.getIsfMgdl("XdripPlugin"))
             status.append(" ")
                 .append(if (bgi >= 0) "+" else "")
@@ -251,11 +251,11 @@ class XdripPlugin @Inject constructor(
         context.sendBroadcast(intent)
         val q = context.packageManager.safeQueryBroadcastReceivers(intent, 0)
         return if (q.isEmpty()) {
-            ToastUtils.errorToast(context, R.string.xdrip_not_installed)
+            rxBus.send(EventShowSnackbar(rh.gs(R.string.xdrip_not_installed), EventShowSnackbar.Type.Error))
             aapsLogger.debug(rh.gs(R.string.xdrip_not_installed))
             false
         } else {
-            ToastUtils.infoToast(context, R.string.calibration_sent)
+            rxBus.send(EventShowSnackbar(rh.gs(R.string.calibration_sent), EventShowSnackbar.Type.Info))
             aapsLogger.debug(rh.gs(R.string.calibration_sent))
             true
         }

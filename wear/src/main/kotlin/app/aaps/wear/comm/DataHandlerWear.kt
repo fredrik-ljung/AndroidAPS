@@ -46,12 +46,14 @@ import app.aaps.wear.complications.LongStatusFlippedComplication
 import app.aaps.wear.complications.SgvComplication
 import app.aaps.wear.complications.SgvComplicationExt1
 import app.aaps.wear.complications.SgvComplicationExt2
+import app.aaps.wear.complications.SgvLargeComplication
 import app.aaps.wear.complications.UploaderBatteryComplication
 import app.aaps.wear.data.ComplicationDataRepository
 import app.aaps.wear.interaction.WatchfaceConfigurationActivity
 import app.aaps.wear.interaction.actions.AcceptActivity
 import app.aaps.wear.interaction.actions.ProfileSwitchActivity
 import app.aaps.wear.tile.ActionsTileService
+import app.aaps.wear.tile.BgGraphTileService
 import app.aaps.wear.tile.RunningModeTileService
 import app.aaps.wear.tile.QuickWizardTileService
 import app.aaps.wear.tile.TempTargetTileService
@@ -230,6 +232,7 @@ class DataHandlerWear @Inject constructor(
 
                     // Trigger complications AFTER DataStore write completes
                     triggerComplicationUpdates()
+                    TileService.getUpdater(context).requestUpdate(BgGraphTileService::class.java)
                 }
 
                 LocalBroadcastManager.getInstance(context).sendBroadcast(Intent(DataLayerListenerServiceWear.INTENT_NEW_DATA))
@@ -474,6 +477,7 @@ class DataHandlerWear @Inject constructor(
             SgvComplication::class.java,
             SgvComplicationExt1::class.java,
             SgvComplicationExt2::class.java,
+            SgvLargeComplication::class.java,
             // Long status complications (show detailed glucose + status info)
             LongStatusComplication::class.java,
             LongStatusFlippedComplication::class.java,

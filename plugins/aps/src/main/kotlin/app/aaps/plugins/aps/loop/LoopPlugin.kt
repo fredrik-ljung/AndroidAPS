@@ -62,6 +62,7 @@ import app.aaps.core.interfaces.rx.events.EventLoopUpdateGui
 import app.aaps.core.interfaces.rx.events.EventMobileToWear
 import app.aaps.core.interfaces.rx.events.EventNewOpenLoopNotification
 import app.aaps.core.interfaces.rx.events.EventRefreshOverview
+import app.aaps.core.interfaces.rx.events.EventShowSnackbar
 import app.aaps.core.interfaces.rx.weardata.EventData
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.DateUtil
@@ -81,7 +82,6 @@ import app.aaps.core.objects.extensions.json
 import app.aaps.core.objects.extensions.plannedRemainingMinutes
 import app.aaps.core.ui.compose.icons.IcLoopClosed
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
-import app.aaps.core.ui.toast.ToastUtils
 import app.aaps.plugins.aps.R
 import app.aaps.plugins.aps.loop.events.EventLoopSetLastRunGui
 import app.aaps.plugins.aps.loop.extensions.json
@@ -280,10 +280,13 @@ class LoopPlugin @Inject constructor(
                     )
                 }
                 if (newRM == RM.Mode.DISABLED_LOOP && config.APS) {
+                    // DISABLED_LOOP is a working-bucket mode so the reconciler treats entry as
+                    // a no-op. Keep the inline cancel to ensure any APS-driven TBR is stopped
+                    // when the loop goes dark.
                     commandQueue.cancelTempBasal(enforceNew = true, callback = object : Callback() {
                         override fun run() {
                             if (!result.success) {
-                                ToastUtils.errorToast(context, rh.gs(app.aaps.core.ui.R.string.temp_basal_delivery_error))
+                                rxBus.send(EventShowSnackbar(rh.gs(app.aaps.core.ui.R.string.temp_basal_delivery_error), EventShowSnackbar.Type.Error))
                             }
                         }
                     })
@@ -306,7 +309,9 @@ class LoopPlugin @Inject constructor(
             }
 
             RM.Mode.RESUME                                                                         -> {
-                // Cancel temporary mode if really temporary
+                // Cancel temporary mode if really temporary. The RunningModeReconciler observes
+                // the DB change and cancels any zero-TBR left by a zero-delivery mode; no inline
+                // commandQueue call needed here.
                 val updated = runBlocking {
                     persistenceLayer.cancelCurrentRunningMode(
                         timestamp = now,
@@ -315,17 +320,6 @@ class LoopPlugin @Inject constructor(
                     )
                 }
                 rxBus.send(EventRefreshOverview("handleRunningModeChange"))
-                // Cancel temp basal only on main phone
-                // On AAPSClient change RunningMode only and let Loop on main phone do the rest
-                if (config.APS)
-                    commandQueue.cancelTempBasal(enforceNew = true, callback = object : Callback() {
-                        override fun run() {
-                            if (!result.success) {
-                                uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.temp_basal_delivery_error), app.aaps.core.ui.R.raw.boluserror)
-                            }
-                        }
-                    })
-
                 return updated.updated.isNotEmpty()
             }
         }
@@ -343,34 +337,40 @@ class LoopPlugin @Inject constructor(
         val loopInvocationAllowed = constraintChecker.isLoopInvocationAllowed()
         val lgsModeForced = constraintChecker.isLgsForced()
 
-        // Suspended pump found but suspended running mode not set
-        if (activePlugin.activePump.isSuspended() && runningMode.mode != RM.Mode.SUSPENDED_BY_PUMP) {
-            suspendLoop(
-                mode = RM.Mode.SUSPENDED_BY_PUMP,
-                autoForced = true,
-                reasons = rh.gs(app.aaps.core.ui.R.string.pumpsuspended),
-                durationInMinutes = Int.MAX_VALUE,
-                action = Action.SUSPEND,
-                source = Sources.Loop
-            )
-            rxBus.send(EventRefreshOverview("runningModePreCheck"))
-            return
-        }
-        // Pump not suspended anymore but running mode is suspended by pump -> end running mode
-        if (!activePlugin.activePump.isSuspended() && runningMode.mode == RM.Mode.SUSPENDED_BY_PUMP) {
-            runningMode.duration = dateUtil.now() - runningMode.timestamp
-            @SuppressLint("CheckResult")
-            runBlocking {
-                persistenceLayer.insertOrUpdateRunningMode(
-                    runningMode = runningMode,
-                    action = Action.PUMP_RUNNING,
-                    source = Sources.Loop,
-                    listValues = listOf(ValueWithUnit.SimpleString(rh.gs(app.aaps.core.ui.R.string.pump_running)))
+        // Pump-state reconciliation: only on the device that actually owns the pump.
+        // Followers (config.APS=false) must not react to their own local activePump.isSuspended()
+        // state because they have no real pump — doing so rewrites NS-synced SUSPENDED_BY_PUMP
+        // rows with garbage durations and triggers a cross-device feedback loop.
+        if (config.APS) {
+            // Suspended pump found but suspended running mode not set
+            if (activePlugin.activePump.isSuspended() && runningMode.mode != RM.Mode.SUSPENDED_BY_PUMP) {
+                suspendLoop(
+                    mode = RM.Mode.SUSPENDED_BY_PUMP,
+                    autoForced = true,
+                    reasons = rh.gs(app.aaps.core.ui.R.string.pumpsuspended),
+                    durationInMinutes = Int.MAX_VALUE,
+                    action = Action.SUSPEND,
+                    source = Sources.Loop
                 )
+                rxBus.send(EventRefreshOverview("runningModePreCheck"))
+                return
             }
-            // re-run to process other conditions
-            runningModePreCheck()
-            return
+            // Pump not suspended anymore but running mode is suspended by pump -> end running mode
+            if (!activePlugin.activePump.isSuspended() && runningMode.mode == RM.Mode.SUSPENDED_BY_PUMP) {
+                runningMode.duration = dateUtil.now() - runningMode.timestamp
+                @SuppressLint("CheckResult")
+                runBlocking {
+                    persistenceLayer.insertOrUpdateRunningMode(
+                        runningMode = runningMode,
+                        action = Action.PUMP_RUNNING,
+                        source = Sources.Loop,
+                        listValues = listOf(ValueWithUnit.SimpleString(rh.gs(app.aaps.core.ui.R.string.pump_running)))
+                    )
+                }
+                // re-run to process other conditions
+                runningModePreCheck()
+                return
+            }
         }
 
         var action = Action.CLOSED_LOOP_MODE
@@ -579,15 +579,15 @@ class LoopPlugin @Inject constructor(
                                 val intentAction5m = Intent(context, CarbSuggestionReceiver::class.java)
                                 intentAction5m.putExtra("ignoreDuration", 5)
                                 val pendingIntent5m = PendingIntent.getBroadcast(context, 1, intentAction5m, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-                                val actionIgnore5m = NotificationCompat.Action(app.aaps.core.objects.R.drawable.ic_notif_aaps, rh.gs(R.string.ignore5m, "Ignore 5m"), pendingIntent5m)
+                                val actionIgnore5m = NotificationCompat.Action(app.aaps.core.ui.R.drawable.ic_notif_aaps, rh.gs(R.string.ignore5m, "Ignore 5m"), pendingIntent5m)
                                 val intentAction15m = Intent(context, CarbSuggestionReceiver::class.java)
                                 intentAction15m.putExtra("ignoreDuration", 15)
                                 val pendingIntent15m = PendingIntent.getBroadcast(context, 2, intentAction15m, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-                                val actionIgnore15m = NotificationCompat.Action(app.aaps.core.objects.R.drawable.ic_notif_aaps, rh.gs(R.string.ignore15m, "Ignore 15m"), pendingIntent15m)
+                                val actionIgnore15m = NotificationCompat.Action(app.aaps.core.ui.R.drawable.ic_notif_aaps, rh.gs(R.string.ignore15m, "Ignore 15m"), pendingIntent15m)
                                 val intentAction30m = Intent(context, CarbSuggestionReceiver::class.java)
                                 intentAction30m.putExtra("ignoreDuration", 30)
                                 val pendingIntent30m = PendingIntent.getBroadcast(context, 3, intentAction30m, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-                                val actionIgnore30m = NotificationCompat.Action(app.aaps.core.objects.R.drawable.ic_notif_aaps, rh.gs(R.string.ignore30m, "Ignore 30m"), pendingIntent30m)
+                                val actionIgnore30m = NotificationCompat.Action(app.aaps.core.ui.R.drawable.ic_notif_aaps, rh.gs(R.string.ignore30m, "Ignore 30m"), pendingIntent30m)
                                 val builder = NotificationCompat.Builder(context, CHANNEL_ID)
                                 builder.setSmallIcon(app.aaps.core.ui.R.drawable.notif_icon)
                                     .setContentTitle(rh.gs(R.string.carbs_suggestion))
@@ -920,10 +920,11 @@ class LoopPlugin @Inject constructor(
     private fun allowPercentage(): Boolean = activePlugin.activePump.selectedActivePump() is VirtualPump
 
     /**
-     * Simulate pump disconnection
+     * Enter a zero-delivery running mode (DISCONNECTED_PUMP / SUPER_BOLUS). Pure DB write:
+     * the RunningModeReconciler observes the change and issues zero-TBR (+ cancels any
+     * active extended bolus) on the pump side.
      */
     private fun goToZeroTemp(durationInMinutes: Int, profile: Profile, mode: RM.Mode, action: Action, source: Sources, listValues: List<ValueWithUnit>) {
-        val pump = activePlugin.activePump
         @SuppressLint("CheckResult")
         runBlocking {
             persistenceLayer.insertOrUpdateRunningMode(
@@ -938,38 +939,11 @@ class LoopPlugin @Inject constructor(
                 listValues = listValues
             )
         }
-        if (config.APS) {
-            if (pump.pumpDescription.tempBasalStyle == PumpDescription.ABSOLUTE) {
-                commandQueue.tempBasalAbsolute(0.0, durationInMinutes, true, profile, PumpSync.TemporaryBasalType.EMULATED_PUMP_SUSPEND, object : Callback() {
-                    override fun run() {
-                        if (!result.success) {
-                            uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.temp_basal_delivery_error), app.aaps.core.ui.R.raw.boluserror)
-                        }
-                    }
-                })
-            } else {
-                commandQueue.tempBasalPercent(0, durationInMinutes, true, profile, PumpSync.TemporaryBasalType.EMULATED_PUMP_SUSPEND, object : Callback() {
-                    override fun run() {
-                        if (!result.success) {
-                            uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.temp_basal_delivery_error), app.aaps.core.ui.R.raw.boluserror)
-                        }
-                    }
-                })
-            }
-            if (pump.pumpDescription.isExtendedBolusCapable && runBlocking { persistenceLayer.getExtendedBolusActiveAt(dateUtil.now()) } != null) {
-                commandQueue.cancelExtended(object : Callback() {
-                    override fun run() {
-                        if (!result.success) {
-                            uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.extendedbolusdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
-                        }
-                    }
-                })
-            }
-        }
     }
 
     /**
-     * Suspend loop
+     * Enter a suspended running mode (SUSPENDED_BY_USER / SUSPENDED_BY_PUMP). Pure DB write:
+     * the RunningModeReconciler observes the change and cancels any active TBR on the pump side.
      */
     fun suspendLoop(mode: RM.Mode, autoForced: Boolean, reasons: String?, durationInMinutes: Int, action: Action, source: Sources, note: String? = null, listValues: List<ValueWithUnit> = emptyList()) {
         assert(mode == RM.Mode.SUSPENDED_BY_PUMP || mode == RM.Mode.SUSPENDED_BY_USER)
@@ -983,14 +957,6 @@ class LoopPlugin @Inject constructor(
                 listValues = listValues
             )
         }
-        if (config.APS)
-            commandQueue.cancelTempBasal(enforceNew = false, autoForced = autoForced, callback = object : Callback() {
-                override fun run() {
-                    if (!result.success) {
-                        uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.temp_basal_delivery_error), app.aaps.core.ui.R.raw.boluserror)
-                    }
-                }
-            })
     }
 
     var task: Runnable? = null
