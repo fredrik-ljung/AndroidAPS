@@ -3,27 +3,31 @@ package app.aaps.ui.compose.scenes.wizard
 import androidx.compose.runtime.Stable
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import app.aaps.core.data.model.RM
 import app.aaps.core.data.model.Scene
 import app.aaps.core.data.model.SceneAction
 import app.aaps.core.data.model.SceneEndAction
 import app.aaps.core.data.model.TE
-import app.aaps.core.data.model.TT
 import app.aaps.core.data.model.TTPreset
 import app.aaps.core.interfaces.profile.LocalProfileManager
 import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.resources.ResourceHelper
+import app.aaps.core.interfaces.tempTargets.toTTPresets
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.Translator
 import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.ui.compose.scenes.SceneRepository
 import app.aaps.ui.compose.scenes.SceneTemplate
-import app.aaps.core.interfaces.tempTargets.toTTPresets
+import app.aaps.ui.compose.scenes.toScenes
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import java.util.UUID
 import javax.inject.Inject
@@ -51,8 +55,9 @@ class SceneWizardViewModel @Inject constructor(
         const val STEP_LOOP_MODE = 5
         const val STEP_CAREPORTAL = 6
         const val STEP_DURATION = 7
-        const val STEP_NAME_ICON = 8
-        const val TOTAL_STEPS = 8 // steps 1-8 (step 0 is template picker, not counted in progress)
+        const val STEP_CHAIN = 8
+        const val STEP_NAME_ICON = 9
+        const val TOTAL_STEPS = 9 // steps 1-9 (step 0 is template picker, not counted in progress)
     }
 
     data class WizardState(
@@ -62,16 +67,17 @@ class SceneWizardViewModel @Inject constructor(
         val profileEnabled: Boolean = false,
         val ttEnabled: Boolean = false,
         val smbEnabled: Boolean = false,
-        val loopModeEnabled: Boolean = false,
+        val runningModeEnabled: Boolean = false,
         val carePortalEnabled: Boolean = false,
         // Action configs
         val profileAction: SceneAction.ProfileSwitch = SceneAction.ProfileSwitch(profileName = "", percentage = 100),
         val ttAction: SceneAction.TempTarget? = null,
         val smbAction: SceneAction.SmbToggle = SceneAction.SmbToggle(enabled = false),
-        val loopModeAction: SceneAction.LoopModeChange = SceneAction.LoopModeChange(mode = RM.Mode.CLOSED_LOOP_LGS),
+        val runningModeAction: SceneAction.LoopModeChange = SceneAction.LoopModeChange(mode = RM.Mode.CLOSED_LOOP_LGS),
         val carePortalAction: SceneAction.CarePortalEvent = SceneAction.CarePortalEvent(type = TE.Type.EXERCISE),
         // Metadata
         val durationMinutes: Int = 60,
+        val chainTargetId: String? = null,
         val name: String = "",
         val icon: String = "star"
     )
@@ -101,18 +107,29 @@ class SceneWizardViewModel @Inject constructor(
             profileEnabled = profileAction != null,
             ttEnabled = ttAction != null,
             smbEnabled = smbAction != null,
-            loopModeEnabled = loopModeAction != null,
+            runningModeEnabled = loopModeAction != null,
             carePortalEnabled = carePortalAction != null,
             profileAction = profileAction ?: SceneAction.ProfileSwitch(profileName = "", percentage = 100),
             ttAction = ttAction,
             smbAction = smbAction ?: SceneAction.SmbToggle(enabled = false),
-            loopModeAction = loopModeAction ?: SceneAction.LoopModeChange(mode = RM.Mode.CLOSED_LOOP_LGS),
+            runningModeAction = loopModeAction ?: SceneAction.LoopModeChange(mode = RM.Mode.CLOSED_LOOP_LGS),
             carePortalAction = carePortalAction ?: SceneAction.CarePortalEvent(type = TE.Type.EXERCISE),
             durationMinutes = scene.defaultDurationMinutes,
+            chainTargetId = (scene.endAction as? SceneEndAction.ChainScene)?.sceneId
+                ?.takeIf { id -> sceneRepository.getScene(id) != null },
             name = scene.name,
             icon = scene.icon
         )
     }
+
+    /** Other existing scenes available as chain targets (all except the one being edited), reactive. */
+    val availableChainTargets: StateFlow<List<Scene>> = sceneRepository.scenesFlow
+        .map { raw -> raw.toScenes().filter { it.id != editingSceneId } }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = sceneRepository.getScenes().filter { it.id != editingSceneId }
+        )
 
     val profileNames: List<String>
         get() = localProfileManager.profile?.getProfileList()?.map { it.toString() } ?: emptyList()
@@ -124,8 +141,6 @@ class SceneWizardViewModel @Inject constructor(
         "${profileUtil.fromMgdlToStringInUnits(mgdl)} ${profileUtil.units.asText}"
 
     fun translateEventType(type: TE.Type): String = translator.translate(type)
-
-    fun formatMinutes(minutes: Int): String = dateUtil.niceTimeScalar(minutes * 60_000L, rh)
 
     fun selectTemplate(template: SceneTemplate) {
         val hasAction = { cls: Class<*> -> template.defaultActions.any { cls.isInstance(it) } }
@@ -155,12 +170,12 @@ class SceneWizardViewModel @Inject constructor(
             profileEnabled = hasAction(SceneAction.ProfileSwitch::class.java),
             ttEnabled = hasAction(SceneAction.TempTarget::class.java),
             smbEnabled = hasAction(SceneAction.SmbToggle::class.java),
-            loopModeEnabled = hasAction(SceneAction.LoopModeChange::class.java),
+            runningModeEnabled = hasAction(SceneAction.LoopModeChange::class.java),
             carePortalEnabled = hasAction(SceneAction.CarePortalEvent::class.java),
             profileAction = profileAction,
             ttAction = ttAction,
             smbAction = smbAction,
-            loopModeAction = loopModeAction,
+            runningModeAction = loopModeAction,
             carePortalAction = carePortalAction,
             durationMinutes = template.defaultDurationMinutes,
             name = if (template == SceneTemplate.BLANK) "" else templateName,
@@ -198,7 +213,7 @@ class SceneWizardViewModel @Inject constructor(
     }
 
     fun setLoopModeEnabled(enabled: Boolean) {
-        _state.update { it.copy(loopModeEnabled = enabled) }
+        _state.update { it.copy(runningModeEnabled = enabled) }
     }
 
     fun setCarePortalEnabled(enabled: Boolean) {
@@ -218,7 +233,7 @@ class SceneWizardViewModel @Inject constructor(
     }
 
     fun updateLoopModeAction(action: SceneAction) {
-        if (action is SceneAction.LoopModeChange) _state.update { it.copy(loopModeAction = action) }
+        if (action is SceneAction.LoopModeChange) _state.update { it.copy(runningModeAction = action) }
     }
 
     fun updateCarePortalAction(action: SceneAction) {
@@ -227,6 +242,10 @@ class SceneWizardViewModel @Inject constructor(
 
     fun setDuration(minutes: Int) {
         _state.update { it.copy(durationMinutes = minutes) }
+    }
+
+    fun setChainTarget(targetId: String?) {
+        _state.update { it.copy(chainTargetId = targetId) }
     }
 
     fun setName(name: String) {
@@ -241,21 +260,30 @@ class SceneWizardViewModel @Inject constructor(
         val s = _state.value
         if (s.name.isBlank()) return false
 
+        val sceneId = editingSceneId ?: UUID.randomUUID().toString()
+        // Defensive: self-chain would infinite-loop on zero-duration scenes.
+        // availableChainTargets already filters out editingSceneId, so this is only reachable
+        // if state is manipulated outside the wizard UI — keep as a backstop.
+        if (s.chainTargetId == sceneId) return false
+
         val actions = buildList {
             if (s.profileEnabled) add(s.profileAction)
             if (s.ttEnabled && s.ttAction != null) add(s.ttAction)
             if (s.smbEnabled) add(s.smbAction)
-            if (s.loopModeEnabled) add(s.loopModeAction)
+            if (s.runningModeEnabled) add(s.runningModeAction)
             if (s.carePortalEnabled) add(s.carePortalAction)
         }
 
+        val endAction = s.chainTargetId?.let { SceneEndAction.ChainScene(it) }
+            ?: SceneEndAction.Notification
+
         val scene = Scene(
-            id = editingSceneId ?: UUID.randomUUID().toString(),
+            id = sceneId,
             name = s.name,
             icon = s.icon,
             defaultDurationMinutes = s.durationMinutes,
             actions = actions,
-            endAction = SceneEndAction.Notification,
+            endAction = endAction,
             isDeletable = true
         )
         sceneRepository.saveScene(scene)

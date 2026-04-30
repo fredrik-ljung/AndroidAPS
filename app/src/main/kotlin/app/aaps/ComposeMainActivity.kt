@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -129,7 +130,7 @@ import app.aaps.implementation.protection.BiometricCheck
 import app.aaps.plugins.configuration.setupwizard.SWDefinition
 import app.aaps.plugins.source.DexcomPlugin
 import app.aaps.plugins.source.activities.RequestDexcomPermissionActivity
-import app.aaps.ui.compose.automationSheet.AutomationViewModel
+import app.aaps.ui.compose.scenesSheet.ScenesViewModel
 import app.aaps.ui.compose.careDialog.CareportalEventType
 import app.aaps.ui.compose.configuration.ConfigurationViewModel
 import app.aaps.ui.compose.fillDialog.FillPreselect
@@ -208,7 +209,7 @@ class ComposeMainActivity : AppCompatActivity() {
     private val maintenanceViewModel: MaintenanceViewModel by viewModels()
     private val statusViewModel: StatusViewModel by viewModels()
     private val treatmentViewModel: TreatmentViewModel by viewModels()
-    private val automationViewModel: AutomationViewModel by viewModels()
+    private val scenesViewModel: ScenesViewModel by viewModels()
     private val loopActionViewModel: LoopActionViewModel by viewModels()
     private val graphViewModel: GraphViewModel by viewModels {
         viewModelFactory { initializer { graphViewModelFactory.create(overviewDataCache) } }
@@ -236,6 +237,10 @@ class ComposeMainActivity : AppCompatActivity() {
     private val disposable = CompositeDisposable()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Bar icon color is kept in sync with the AAPS-effective theme reactively
+        // from inside AapsTheme via a SideEffect on WindowInsetsControllerCompat,
+        // so a plain enableEdgeToEdge() here is enough.
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
         // Activity result launchers (from base class)
@@ -605,7 +610,7 @@ class ComposeMainActivity : AppCompatActivity() {
                     maintenanceViewModel = maintenanceViewModel,
                     statusViewModel = statusViewModel,
                     treatmentViewModel = treatmentViewModel,
-                    automationViewModel = automationViewModel,
+                    scenesViewModel = scenesViewModel,
                     loopActionViewModel = loopActionViewModel,
                     // Search
                     searchUiState = searchState,

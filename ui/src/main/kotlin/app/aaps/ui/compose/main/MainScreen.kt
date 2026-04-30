@@ -3,14 +3,22 @@ package app.aaps.ui.compose.main
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsBottomHeight
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.rememberDrawerState
@@ -42,8 +50,8 @@ import app.aaps.core.ui.compose.navigation.NavigationRequest
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
 import app.aaps.ui.compose.alertDialogs.AboutAlertDialog
 import app.aaps.ui.compose.alertDialogs.AboutDialogData
-import app.aaps.ui.compose.automationSheet.AutomationBottomSheet
-import app.aaps.ui.compose.automationSheet.AutomationViewModel
+import app.aaps.ui.compose.scenesSheet.ScenesBottomSheet
+import app.aaps.ui.compose.scenesSheet.ScenesViewModel
 import app.aaps.ui.compose.maintenance.ImportSource
 import app.aaps.ui.compose.maintenance.MaintenanceDialogs
 import app.aaps.ui.compose.maintenance.MaintenanceViewModel
@@ -73,7 +81,7 @@ fun MainScreen(
     maintenanceViewModel: MaintenanceViewModel,
     statusViewModel: StatusViewModel,
     treatmentViewModel: TreatmentViewModel,
-    automationViewModel: AutomationViewModel,
+    scenesViewModel: ScenesViewModel,
     loopActionViewModel: app.aaps.ui.compose.loopSheet.LoopActionViewModel,
     // Search
     searchUiState: SearchUiState,
@@ -132,7 +140,7 @@ fun MainScreen(
     var showTreatmentSheet by remember { mutableStateOf(false) }
     var showAutomationSheet by remember { mutableStateOf(false) }
     var showLoopActionSheet by remember { mutableStateOf(false) }
-    val automationState by automationViewModel.uiState.collectAsStateWithLifecycle()
+    val automationState by scenesViewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = LocalSnackbarHostState.current
 
     // Sync drawer state with ui state
@@ -190,6 +198,12 @@ fun MainScreen(
                 }
             }
 
+            // topBar/bottomBar are intentionally absent — chrome is rendered as
+            // overlays inside the content (see AnimatedVisibility blocks below) so
+            // it can hide in preview mode without reflowing layout. The status-bar
+            // and navigation-bar protection scrims rely on this: they read raw
+            // WindowInsets.statusBars / navigationBars, which would be consumed
+            // (returning zero height) if those Scaffold slots were populated.
             Scaffold { scaffoldPadding ->
                 val hasToolbar = quickLaunchItems.isNotEmpty()
 
@@ -273,6 +287,25 @@ fun MainScreen(
                             .padding(contentPadding)
                     )
 
+                    // Status bar protection scrim — keeps system icons legible
+                    // against the floating search bar / graph content
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .windowInsetsTopHeight(WindowInsets.statusBars)
+                            .background(MaterialTheme.colorScheme.surface)
+                    )
+
+                    // Navigation bar protection scrim
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .windowInsetsBottomHeight(WindowInsets.navigationBars)
+                            .background(MaterialTheme.colorScheme.surface)
+                    )
+
                     // Top bar overlay
                     AnimatedVisibility(
                         visible = showChrome,
@@ -316,7 +349,7 @@ fun MainScreen(
                             },
                             quickWizardCount = uiState.quickWizardItems.size,
                             onAutomationClick = {
-                                automationViewModel.refreshState()
+                                scenesViewModel.refreshState()
                                 showAutomationSheet = true
                             },
                             automationCount = automationState.items.size + automationState.sceneItems.size,
@@ -391,7 +424,7 @@ fun MainScreen(
 
     // Automation bottom sheet
     if (showAutomationSheet) {
-        AutomationBottomSheet(
+        ScenesBottomSheet(
             onDismiss = { showAutomationSheet = false },
             automationItems = automationState.items,
             onItemClick = { item -> mainViewModel.requestAutomationConfirmation(item.eventId) },
