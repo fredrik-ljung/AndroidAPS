@@ -201,7 +201,7 @@
     <string name="pref_title_carbs_request_threshold">Umbral de carbohidratos requeridos</string>
     <string name="carbs_req_threshold_summary">Umbral mínimo de carbohidratos para mostrar una alerta de sugerencia. Las sugerencias de carbohidratos por debajo de este valor no activarán una notificación</string>
     <string name="pref_title_half_basal_exercise_target">Objetivo de ejercicio con mitad de basal</string>
-    <string name="half_basal_exercise_target_summary">Establezca un valor numérico, por ejemplo 160, que significa que cuando el objetivo temporal sea 160 mg/dL y la opción de sensibilidad ante objetivos altos esté activada, se administrará el 50% de la basal en este nivel (120 = 75%; 140 = 60%).</string>
+    <string name="half_basal_exercise_target_summary">Establezca un valor, por ejemplo 160. Esto significa que cuando el objetivo temporal sea 160 mg/dL y «Objetivo alto aumenta sensibilidad=true», se aplicará un 50%% de basal a este nivel (120 = 75%%; 140 = 60%%).</string>
     <string name="pref_title_iob_threshold_percent">Porcentaje de umbral de IOB</string>
     <string name="openapsama_iob_threshold_percent_summary" formatted="false">Porcentaje de maxIOB por encima del cual se desactivan los SMB.\n\Valor por defecto: 100%\nCon un 100%, esta función queda efectivamente desactivada</string>
     <string name="pref_title_dynisf_adjustment_factor">Factor de ajuste de ISF dinámico</string>
@@ -254,6 +254,7 @@
     <string name="units_format_mgdl">%1$s mg/dL</string>
     <string name="units_format_double">%1$.1f</string>
     <string name="units_format_double_2">%1$.2f</string>
+    <string name="units_format_double_3">%1$.3f</string>
     <!-- Formatted unit strings with value and range -->
     <string name="units_format_grams_range">%1$d g (%2$d - %3$d)</string>
     <string name="units_format_min_range">%1$d min (%2$d - %3$d)</string>
@@ -268,6 +269,7 @@
     <string name="units_format_mgdl_range">%1$s mg/dL (%2$s - %3$s)</string>
     <string name="units_format_double_range">%1$.1f (%2$.1f - %3$.1f)</string>
     <string name="units_format_double_2_range">%1$.2f (%2$.2f - %3$.2f)</string>
+    <string name="units_format_double_3_range">%1$.3f (%2$.3f - %3$.3f)</string>
     <string name="pref_title_language">Idioma</string>
     <string name="lang_default">Predeterminado del sistema</string>
     <string name="lang_en">Inglés</string>
@@ -354,9 +356,9 @@
     <string name="pref_title_max_basal">Tasa basal máxima</string>
     <string name="openapsma_max_basal_summary">Este valor se conoce comúnmente como max-basal dentro del ecosistema de OpenAPS</string>
     <string name="pref_title_smb_max_iob">IOB Máximo para SMB</string>
-    <string name="openapssmb_max_iob_summary">Este valor se denomina Max IOB en el contexto de OpenAPS\n.OpenAPS no añadirá más insulina si el IOB actual es mayor que este valor</string>
+    <string name="openapssmb_max_iob_summary">Este valor se denomina Max IOB en el contexto de OpenAPS\nEl sistema no añadirá más insulina si el IOB actual es mayor que este valor. El valor también se ve afectado por el tipo de paciente</string>
     <string name="pref_title_ama_max_iob">Max IOB para AMA</string>
-    <string name="openapsma_max_iob_summary">Este valor se denomina Max IOB en el contexto de OpenAPS\nRepresenta la cantidad máxima de insulina en unidades [U] que el sistema de lazo cerrado puede administrar de una sola vez</string>
+    <string name="openapsma_max_iob_summary">Este valor se denomina Max IOB en el contexto de OpenAPS\nEs la cantidad máxima de insulina en [U] que el sistema APS puede administrar de una sola vez. El valor también se ve afectado por el tipo de paciente</string>
     <string name="pref_title_max_daily_multiplier">Multiplicador de seguridad diaria máxima</string>
     <string name="openapsama_max_daily_safety_multiplier_summary">Valor por defecto: 3. Este es un límite de seguridad clave de OpenAPS. Lo que hace es limitar tus basales a un máximo de 3 veces (en este caso) tu tasa basal más alta. Es probable que no necesites cambiar esto, pero debes ser consciente de que a esto se refiere la regla de \'3 veces el máximo diario; 4 veces la actual\' cuando se habla de límites de seguridad</string>
     <string name="pref_title_current_basal_multiplier">Multiplicador de seguridad basal actual</string>

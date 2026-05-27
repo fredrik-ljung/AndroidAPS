@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import app.aaps.core.data.iob.InMemoryGlucoseValue
 import app.aaps.core.data.model.ActiveSceneState
 import app.aaps.core.data.model.RM
+import app.aaps.core.data.model.SceneEndAction
 import app.aaps.core.data.model.TT
 import app.aaps.core.data.time.T
 import app.aaps.core.data.ue.Action
@@ -21,6 +22,8 @@ import app.aaps.core.interfaces.insulin.Insulin
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.UserEntryLogger
+import app.aaps.core.interfaces.notifications.NotificationId
+import app.aaps.core.interfaces.notifications.NotificationManager
 import app.aaps.core.interfaces.overview.graph.OverviewDataCache
 import app.aaps.core.interfaces.overview.graph.ProfileDisplayData
 import app.aaps.core.interfaces.overview.graph.RunningModeDisplayData
@@ -29,15 +32,15 @@ import app.aaps.core.interfaces.overview.graph.TbrState
 import app.aaps.core.interfaces.overview.graph.TempTargetDisplayData
 import app.aaps.core.interfaces.overview.graph.TempTargetState
 import app.aaps.core.interfaces.plugin.ActivePlugin
-import app.aaps.core.interfaces.profile.LocalProfileManager
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.profile.ProfileFunction
+import app.aaps.core.interfaces.profile.ProfileRepository
+import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.protection.ProtectionCheck
 import app.aaps.core.interfaces.protection.ProtectionResult
 import app.aaps.core.interfaces.pump.DetailedBolusInfo
 import app.aaps.core.interfaces.pump.Pump
 import app.aaps.core.interfaces.pump.defs.determineCorrectBolusStepSize
-import app.aaps.core.interfaces.queue.Callback
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
@@ -51,12 +54,12 @@ import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.core.objects.extensions.toStringFull
+import app.aaps.core.objects.runningMode.PumpCommandGate
 import app.aaps.core.objects.runningMode.RunningModeGuard
-import app.aaps.core.objects.runningMode.TbrGate
 import app.aaps.core.objects.wizard.QuickWizard
 import app.aaps.core.objects.wizard.QuickWizardEntry
 import app.aaps.core.objects.wizard.QuickWizardMode
-import app.aaps.ui.compose.alertDialogs.AboutDialogData
+import app.aaps.ui.compose.aboutDialog.AboutDialogData
 import app.aaps.ui.compose.quickLaunch.QuickLaunchResolver
 import app.aaps.ui.compose.quickLaunch.QuickLaunchSerializer
 import app.aaps.ui.compose.quickLaunch.ResolvedQuickLaunchItem
@@ -95,11 +98,12 @@ class MainViewModel @Inject constructor(
     private val overviewDataCache: OverviewDataCache,
     private val iobCobCalculator: IobCobCalculator,
     private val profileFunction: ProfileFunction,
+    private val profileUtil: ProfileUtil,
     private val constraintChecker: ConstraintsChecker,
     private val quickWizard: QuickWizard,
     private val automation: Automation,
     private val persistenceLayer: PersistenceLayer,
-    private val localProfileManager: LocalProfileManager,
+    private val profileRepository: ProfileRepository,
     private val aapsLogger: AAPSLogger,
     private val quickLaunchResolver: QuickLaunchResolver,
     private val commandQueue: CommandQueue,
@@ -111,7 +115,8 @@ class MainViewModel @Inject constructor(
     private val sceneExecutor: SceneExecutor,
     private val activeSceneManager: ActiveSceneManager,
     private val rxBus: RxBus,
-    private val runningModeGuard: RunningModeGuard
+    private val runningModeGuard: RunningModeGuard,
+    private val notificationManager: NotificationManager
 ) : ViewModel() {
 
     // Event-driven state (drawer, dialogs, simple-mode preference). Imperative .update{} calls
@@ -178,6 +183,7 @@ class MainViewModel @Inject constructor(
             runningModeProgress = chip.runningModeProgress,
             runningModeRecordId = chip.runningModeRecordId,
             tbrState = chip.tbrState,
+            smbEnabled = ev.smbEnabled,
             quickWizardItems = chip.quickWizardItems
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainUiState())
@@ -185,6 +191,9 @@ class MainViewModel @Inject constructor(
     init {
         preferences.observe(BooleanKey.GeneralSimpleMode)
             .onEach { simple -> _eventState.update { it.copy(isSimpleMode = simple) } }
+            .launchIn(viewModelScope)
+        preferences.observe(BooleanKey.ApsUseSmb)
+            .onEach { smb -> _eventState.update { it.copy(smbEnabled = smb) } }
             .launchIn(viewModelScope)
         observeQuickLaunch()
     }
@@ -402,7 +411,7 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    private fun executeInsulinMode(entry: QuickWizardEntry) {
+    private suspend fun executeInsulinMode(entry: QuickWizardEntry) {
         val pump = activePlugin.activePump
         if (!pump.isInitialized() || pump.isSuspended()) return
 
@@ -411,6 +420,7 @@ class MainViewModel @Inject constructor(
             ConstraintObject(insulin, aapsLogger)
         ).value()
         if (insulinAfterConstraints <= 0.0) return
+        if (runningModeGuard.checkWithSnackbar(PumpCommandGate.CommandKind.BOLUS)) return
 
         val message = buildString {
             append(rh.gs(app.aaps.core.ui.R.string.bolus) + ": ")
@@ -426,25 +436,20 @@ class MainViewModel @Inject constructor(
                 title = entry.buttonText(),
                 message = message,
                 onOk = {
-                    if (!runningModeGuard.checkWithSnackbar(TbrGate.CommandKind.BOLUS)) {
-                        uel.log(
-                            Action.BOLUS, Sources.QuickWizard,
-                            entry.buttonText(),
-                            ValueWithUnit.Insulin(insulinAfterConstraints)
-                        )
-                        val detailedBolusInfo = DetailedBolusInfo().apply {
-                            eventType = app.aaps.core.data.model.TE.Type.CORRECTION_BOLUS
-                            this.insulin = insulinAfterConstraints
-                        }
-                        commandQueue.bolus(detailedBolusInfo, object : Callback() {
-                            override fun run() {
-                                if (!result.success) {
-                                    uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
-                                }
-                            }
-                        })
-                        entry.markAsUsed()
+                    uel.log(
+                        Action.BOLUS, Sources.QuickWizard,
+                        entry.buttonText(),
+                        ValueWithUnit.Insulin(insulinAfterConstraints)
+                    )
+                    val detailedBolusInfo = DetailedBolusInfo().apply {
+                        eventType = app.aaps.core.data.model.TE.Type.CORRECTION_BOLUS
+                        this.insulin = insulinAfterConstraints
                     }
+                    val result = commandQueue.bolus(detailedBolusInfo)
+                    if (!result.success) {
+                        uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
+                    }
+                    entry.markAsUsed()
                 }
             )
         )
@@ -473,13 +478,10 @@ class MainViewModel @Inject constructor(
                         this.carbs = carbs.toDouble()
                         carbsTimestamp = dateUtil.now()
                     }
-                    commandQueue.bolus(detailedBolusInfo, object : Callback() {
-                        override fun run() {
-                            if (!result.success) {
-                                uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
-                            }
-                        }
-                    })
+                    val result = commandQueue.bolus(detailedBolusInfo)
+                    if (!result.success) {
+                        uiInteraction.runAlarm(result.comment, rh.gs(app.aaps.core.ui.R.string.treatmentdeliveryerror), app.aaps.core.ui.R.raw.boluserror)
+                    }
                     entry.markAsUsed()
                 }
             )
@@ -661,15 +663,15 @@ class MainViewModel @Inject constructor(
         sceneExecutor.dismiss()
     }
 
-    /** Format milliseconds to human-readable duration using DateUtil */
-    fun formatDuration(ms: Long): String = dateUtil.niceTimeScalar(ms, rh)
+    /** Format milliseconds to a localized "time remaining" string (e.g., "1h 30m remaining"). */
+    fun formatDuration(ms: Long): String = dateUtil.timeRemainingString(ms, rh)
 
     fun requestSceneConfirmation(sceneId: String) {
         val scene = sceneRepository.getScene(sceneId) ?: return
         val actionSummary = scene.actions.joinToString("\n") { action ->
             when (action) {
                 is app.aaps.core.data.model.SceneAction.TempTarget      ->
-                    rh.gs(app.aaps.core.ui.R.string.scene_action_tt, "${action.targetMgdl} mg/dL")
+                    rh.gs(app.aaps.core.ui.R.string.scene_action_tt, profileUtil.fromMgdlToStringWithUnits(action.targetMgdl))
 
                 is app.aaps.core.data.model.SceneAction.ProfileSwitch   ->
                     rh.gs(app.aaps.core.ui.R.string.scene_action_profile, action.profileName, action.percentage)
@@ -695,11 +697,31 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun requestSceneDeactivation() {
-        val activeState = activeSceneManager.getActiveState() ?: return
+    fun requestSceneDeactivation() = viewModelScope.launch {
+        val activeState = activeSceneManager.getActiveState() ?: return@launch
         val message = rh.gs(app.aaps.core.ui.R.string.scene_confirm_deactivate, activeState.scene.name)
+        // When the scene chains to a runnable follow-up, "Skip to <Next>" becomes the primary
+        // action and "End Scene" the alternative — the chain represents the user's pre-declared
+        // intent for what happens next, so it's the recommended path on early end. Preconditions
+        // mirror SceneExpiryWorker.runChain (target enabled, loop running, pump initialized,
+        // profile set); they are re-checked at execute time as a TOCTOU guard.
+        val chain = activeState.scene.endAction as? SceneEndAction.ChainScene
+        val target = chain?.let { sceneRepository.getScene(it.sceneId) }
+        val ready = target != null &&
+            target.isEnabled &&
+            !loop.runningMode().pausesLoopExecution() &&
+            activePlugin.activePump.isInitialized() &&
+            profileFunction.getProfile() != null
         _actionConfirmation.update {
-            ActionConfirmation(
+            if (ready) ActionConfirmation(
+                title = rh.gs(app.aaps.core.ui.R.string.scene_deactivate),
+                message = message,
+                onConfirmAction = ConfirmableAction.DeactivateAndChainScene(target.id),
+                confirmLabel = rh.gs(app.aaps.core.ui.R.string.scene_skip_to_format, target.name),
+                secondaryAction = ConfirmableAction.DeactivateScene,
+                secondaryLabel = rh.gs(app.aaps.core.ui.R.string.scene_deactivate)
+            )
+            else ActionConfirmation(
                 title = rh.gs(app.aaps.core.ui.R.string.scene_deactivate),
                 message = message,
                 onConfirmAction = ConfirmableAction.DeactivateScene
@@ -744,7 +766,7 @@ class MainViewModel @Inject constructor(
             }
 
             is ConfirmableAction.ActivateProfile          -> {
-                val store = localProfileManager.profile ?: return@launch
+                val store = profileRepository.profile.value ?: return@launch
                 profileFunction.createProfileSwitch(
                     profileStore = store,
                     profileName = action.profileName,
@@ -772,6 +794,45 @@ class MainViewModel @Inject constructor(
             is ConfirmableAction.DeactivateScene          -> {
                 sceneExecutor.deactivate()
             }
+
+            is ConfirmableAction.DeactivateAndChainScene  -> {
+                // User chose "Skip to <Next>": end current scene early, then activate the chain
+                // target. Always deactivates (user committed to ending the current scene); the
+                // chain is best-effort. Re-checks preconditions at execute time as a TOCTOU
+                // guard — the dialog may have been open for arbitrary time, during which the
+                // target could be disabled/deleted, the pump dropped, the loop suspended, or the
+                // profile cleared. If anything changed, we end the current scene cleanly and
+                // skip the chain rather than partially activating onto an unhealthy state.
+                val endedName = activeSceneManager.getActiveState()?.scene?.name
+                val target = sceneRepository.getScene(action.targetSceneId)
+                val canChain = target != null &&
+                    target.isEnabled &&
+                    !loop.runningMode().pausesLoopExecution() &&
+                    activePlugin.activePump.isInitialized() &&
+                    profileFunction.getProfile() != null
+                sceneExecutor.deactivate()
+                if (!canChain) return@launch
+                // Smart-cast: canChain==true implies target!=null (canChain itself includes target!=null).
+                val result = sceneExecutor.activate(target)
+                if (result.success && endedName != null) {
+                    notificationManager.post(
+                        id = NotificationId.SCENE_CHAINED,
+                        text = rh.gs(app.aaps.core.ui.R.string.scene_chained_format, endedName, target.name)
+                    )
+                } else if (!result.success) {
+                    val failed = result.actionResults.count { !it.success }
+                    notificationManager.post(
+                        id = NotificationId.SCENE_CHAIN_ERROR,
+                        text = rh.gs(
+                            app.aaps.core.ui.R.string.scene_chain_error_summary,
+                            endedName ?: "",
+                            target.name,
+                            failed,
+                            result.actionResults.size
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -784,6 +845,7 @@ class MainViewModel @Inject constructor(
 private data class EventState(
     val isDrawerOpen: Boolean = false,
     val isSimpleMode: Boolean = true,
+    val smbEnabled: Boolean = false,
     val showAboutDialog: Boolean = false,
     val showMaintenanceSheet: Boolean = false,
     val showAuthFailedDialog: Boolean = false

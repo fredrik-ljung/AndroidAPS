@@ -22,12 +22,12 @@ import app.aaps.core.interfaces.nsclient.NSClientRepository
 import app.aaps.core.interfaces.nsclient.NSSettingsStatus
 import app.aaps.core.interfaces.nsclient.StoreDataForDb
 import app.aaps.core.interfaces.plugin.ActivePlugin
+import app.aaps.core.interfaces.profile.ProfileRepository
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventAppExit
 import app.aaps.core.interfaces.rx.events.EventConfigBuilderChange
 import app.aaps.core.interfaces.rx.events.EventNSClientRestart
-import app.aaps.core.interfaces.rx.events.EventProfileStoreChanged
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.LongComposedKey
@@ -67,6 +67,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONException
@@ -97,6 +98,7 @@ class NSClientService : DaggerService() {
     @Inject lateinit var nsClientRepository: NSClientRepository
     @Inject lateinit var persistenceLayer: PersistenceLayer
     @Inject lateinit var receiverDelegate: ReceiverDelegate
+    @Inject lateinit var profileRepository: ProfileRepository
 
     companion object {
 
@@ -172,8 +174,8 @@ class NSClientService : DaggerService() {
             .onEach { ack -> processAuthAck(ack) }.launchIn(scope)
         persistenceLayer.observeAnyChange()
             .onEach { types -> resend("DB_CHANGED(${types.joinToString { it.simpleName ?: "?" }})") }.launchIn(scope)
-        rxBus.toFlow(EventProfileStoreChanged::class.java)
-            .onEach { resend("EventProfileStoreChanged") }.launchIn(scope)
+        profileRepository.profile.drop(1)
+            .onEach { resend("profileRepository.profile changed") }.launchIn(scope)
     }
 
     override fun onDestroy() {
@@ -437,7 +439,7 @@ class NSClientService : DaggerService() {
                             // take the newest
                             val profileStoreJson = profiles[profiles.length() - 1] as JSONObject
                             nsClientRepository.addLog("◄ PROFILE", "profile received")
-                            nsIncomingDataProcessor.processProfile(profileStoreJson, false)
+                            scope.launch { nsIncomingDataProcessor.processProfile(profileStoreJson, false) }
                         }
                     }
                     if (data.has("treatments")) {
@@ -514,7 +516,7 @@ class NSClientService : DaggerService() {
                         val foods = data.getJSONArray("food")
                         if (foods.length() > 0) nsClientRepository.addLog("◄ DATA", "received " + foods.length() + " foods")
                         nsIncomingDataProcessor.processFood(foods)
-                        storeDataForDb.storeFoodsToDb()
+                        storeDataForDb.requestStoreFoods()
                     }
                     if (data.has("mbgs")) {
                         val mbgArray = data.getJSONArray("mbgs")
@@ -535,7 +537,7 @@ class NSClientService : DaggerService() {
                         if (sgvs.length() > 0) {
                             nsClientRepository.addLog("◄ DATA", "received " + sgvs.length() + " sgvs")
                             nsIncomingDataProcessor.processSgvs(sgvs, false)
-                            storeDataForDb.storeGlucoseValuesToDb()
+                            storeDataForDb.requestStoreGlucoseValues()
                         }
                     }
                     nsClientRepository.addLog("◄ LAST", dateUtil.dateAndTimeString(latestDateInReceivedData))

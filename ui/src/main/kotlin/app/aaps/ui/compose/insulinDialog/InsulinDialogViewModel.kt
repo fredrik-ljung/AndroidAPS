@@ -25,7 +25,6 @@ import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.pump.DetailedBolusInfo
 import app.aaps.core.interfaces.pump.defs.determineCorrectBolusStepSize
-import app.aaps.core.interfaces.queue.Callback
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.tempTargets.ttDurationMinutes
@@ -37,8 +36,8 @@ import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.constraints.ConstraintObject
+import app.aaps.core.objects.runningMode.PumpCommandGate
 import app.aaps.core.objects.runningMode.RunningModeGuard
-import app.aaps.core.objects.runningMode.TbrGate
 import app.aaps.ui.R
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.channels.BufferOverflow
@@ -138,7 +137,9 @@ class InsulinDialogViewModel @Inject constructor(
         }
         viewModelScope.launch {
             val runningIcfg = getRunningIcfg()
-            val forcedRecordOnly = loop.runningMode().isSuspended() || !pumpInitialized
+            val mode = loop.runningMode()
+            val cantDeliverBolus = PumpCommandGate.check(mode, PumpCommandGate.CommandKind.BOLUS) is PumpCommandGate.Decision.Reject
+            val forcedRecordOnly = cantDeliverBolus || !pumpInitialized
             _uiState.update {
                 it.copy(
                     selectedIcfg = runningIcfg,
@@ -357,21 +358,18 @@ class InsulinDialogViewModel @Inject constructor(
                     automation.removeAutomationEventBolusReminder()
                 }
             } else {
-                if (runningModeGuard.checkWithSnackbar(TbrGate.CommandKind.BOLUS)) return
+                if (runningModeGuard.checkWithSnackbar(PumpCommandGate.CommandKind.BOLUS)) return
                 uel.log(
                     Action.BOLUS, Sources.InsulinDialog,
                     notes,
                     ValueWithUnit.Insulin(insulinAfterConstraints)
                 )
-                commandQueue.bolus(detailedBolusInfo, object : Callback() {
-                    override fun run() {
-                        if (!result.success) {
-                            _sideEffect.tryEmit(SideEffect.ShowDeliveryError(result.comment))
-                        } else {
-                            automation.removeAutomationEventBolusReminder()
-                        }
-                    }
-                })
+                val result = commandQueue.bolus(detailedBolusInfo)
+                if (!result.success) {
+                    _sideEffect.tryEmit(SideEffect.ShowDeliveryError(result.comment))
+                } else {
+                    automation.removeAutomationEventBolusReminder()
+                }
             }
         }
     }

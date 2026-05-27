@@ -10,12 +10,11 @@ import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.UserEntryLogger
 import app.aaps.core.interfaces.plugin.ActivePlugin
-import app.aaps.core.interfaces.queue.Callback
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.objects.constraints.ConstraintObject
+import app.aaps.core.objects.runningMode.PumpCommandGate
 import app.aaps.core.objects.runningMode.RunningModeGuard
-import app.aaps.core.objects.runningMode.TbrGate
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -33,7 +32,7 @@ import kotlin.math.abs
 @Stable
 class ExtendedBolusDialogViewModel @Inject constructor(
     private val constraintChecker: ConstraintsChecker,
-    private val activePlugin: ActivePlugin,
+    activePlugin: ActivePlugin,
     private val commandQueue: CommandQueue,
     private val uel: UserEntryLogger,
     private val rh: ResourceHelper,
@@ -90,13 +89,11 @@ class ExtendedBolusDialogViewModel @Inject constructor(
     }
 
     fun updateInsulin(value: Double) {
-        val clamped = value.coerceIn(uiState.value.extendedStep, uiState.value.maxInsulin)
-        _uiState.update { it.copy(insulin = clamped) }
+        _uiState.update { it.copy(insulin = value) }
     }
 
     fun updateDuration(value: Double) {
-        val clamped = value.coerceIn(uiState.value.extendedDurationStep, uiState.value.extendedMaxDuration)
-        _uiState.update { it.copy(durationMinutes = clamped) }
+        _uiState.update { it.copy(durationMinutes = value) }
     }
 
     fun hasAction(): Boolean {
@@ -128,6 +125,10 @@ class ExtendedBolusDialogViewModel @Inject constructor(
     }
 
     fun confirmAndSave() {
+        viewModelScope.launch { confirmAndSaveSuspend() }
+    }
+
+    private suspend fun confirmAndSaveSuspend() {
         val state = confirmedState ?: return
         val durationInMinutes = state.durationMinutes.toInt()
 
@@ -135,7 +136,7 @@ class ExtendedBolusDialogViewModel @Inject constructor(
             ConstraintObject(state.insulin, aapsLogger)
         ).value()
 
-        if (runningModeGuard.checkWithSnackbar(TbrGate.CommandKind.EXTENDED_BOLUS)) return
+        if (runningModeGuard.checkWithSnackbar(PumpCommandGate.CommandKind.EXTENDED_BOLUS)) return
 
         uel.log(
             action = Action.EXTENDED_BOLUS, source = Sources.ExtendedBolusDialog,
@@ -144,12 +145,7 @@ class ExtendedBolusDialogViewModel @Inject constructor(
                 ValueWithUnit.Minute(durationInMinutes)
             )
         )
-        commandQueue.extendedBolus(insulinAfterConstraints, durationInMinutes, object : Callback() {
-            override fun run() {
-                if (!result.success) {
-                    _sideEffect.tryEmit(SideEffect.ShowDeliveryError(result.comment))
-                }
-            }
-        })
+        val result = commandQueue.extendedBolus(insulinAfterConstraints, durationInMinutes)
+        if (!result.success) _sideEffect.tryEmit(SideEffect.ShowDeliveryError(result.comment))
     }
 }

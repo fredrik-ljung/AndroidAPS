@@ -19,7 +19,6 @@ import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.logging.UserEntryLogger
 import app.aaps.core.interfaces.pump.PumpStatusProvider
-import app.aaps.core.interfaces.queue.Callback
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.smsCommunicator.Sms
 import app.aaps.core.interfaces.sync.XDripBroadcast
@@ -40,6 +39,7 @@ import app.aaps.shared.tests.TestBaseWithProfile
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.BeforeEach
@@ -54,7 +54,6 @@ import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mock
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.kotlin.anyOrNull
-import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
@@ -73,7 +72,7 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
     @Mock lateinit var smsManager: SmsManager
     @Mock lateinit var configBuilder: ConfigBuilder
     @Mock lateinit var pumpStatusProvider: PumpStatusProvider
-    @Mock lateinit var runningModeGuard: RunningModeGuard
+    private lateinit var runningModeGuard: RunningModeGuard
 
     private val iCfg = ICfg(insulinLabel = "Fake", insulinEndTime = 9 * 3600 * 1000, insulinPeakTime = 60 * 60 * 1000, concentration = 1.0)
 
@@ -102,62 +101,38 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
             ).thenReturn(PersistenceLayer.TransactionResult<TT>())
         }
         whenever(insulin.iCfg).thenReturn(iCfg)
+        // Use a real RunningModeGuard so the gate decisions actually fire from the mocked loop
+        // (a mock guard returns null for everything → all gate-protected paths silently allow).
+        runningModeGuard = RunningModeGuard(loop, rh, rxBus)
+        // Default running mode for tests that don't care; individual tests can override.
+        // Without this, the gate sees null mode and PumpCommandGate.check throws NPE.
+        runBlocking { whenever(loop.runningMode()).thenReturn(RM.Mode.CLOSED_LOOP) }
         smsCommunicatorPlugin = SmsCommunicatorPlugin(
-            aapsLogger, rh, smsManager, preferences, constraintChecker, rxBus, profileFunction, profileUtil, activePlugin, insulin, localProfileManager,
+            aapsLogger, rh, smsManager, preferences, constraintChecker, rxBus, profileFunction, profileUtil, activePlugin, insulin, profileRepository,
             commandQueue, loop, iobCobCalculator, xDripBroadcast, otp, config, dateUtilMocked, uel,
             smbGlucoseStatusProvider, persistenceLayer, decimalFormatter, configBuilder, pumpStatusProvider, notificationManager,
             runningModeGuard, testScope, repository
         )
         smsCommunicatorPlugin.setPluginEnabledBlocking(PluginType.SYNC, true)
-        doAnswer { invocation: InvocationOnMock ->
-            val callback = invocation.getArgument<Callback>(2)
-            callback.result = pumpEnactResultProvider.get().success(true)
-            callback.run()
-            null
-        }.whenever(commandQueue).cancelTempBasal(anyBoolean(), anyBoolean(), any(Callback::class.java))
-        doAnswer { invocation: InvocationOnMock ->
-            val callback = invocation.getArgument<Callback>(0)
-            callback.result = pumpEnactResultProvider.get().success(true)
-            callback.run()
-            null
-        }.whenever(commandQueue).cancelExtended(any(Callback::class.java))
-        doAnswer { invocation: InvocationOnMock ->
-            val callback = invocation.getArgument<Callback>(1)
-            callback.result = pumpEnactResultProvider.get().success(true)
-            callback.run()
-            null
-        }.whenever(commandQueue).readStatus(anyString(), any(Callback::class.java))
-        doAnswer { invocation: InvocationOnMock ->
-            val callback = invocation.getArgument<Callback>(1)
-            callback.result = pumpEnactResultProvider.get().success(true).bolusDelivered(1.0)
-            callback.run()
-            null
-        }.whenever(commandQueue).bolus(anyOrNull(), any(Callback::class.java))
-        doAnswer { invocation: InvocationOnMock ->
-            val callback = invocation.getArgument<Callback>(5)
-            callback.result = pumpEnactResultProvider.get().success(true).isPercent(true).percent(invocation.getArgument(0)).duration(invocation.getArgument(1))
-            callback.run()
-            null
-        }.whenever(commandQueue)
-            .tempBasalPercent(anyInt(), anyInt(), anyBoolean(), anyOrNull(), anyOrNull(), any(Callback::class.java))
-        doAnswer { invocation: InvocationOnMock ->
-            val callback = invocation.getArgument<Callback>(5)
-            callback.result = pumpEnactResultProvider.get().success(true).isPercent(false).absolute(invocation.getArgument(0)).duration(invocation.getArgument(1))
-            callback.run()
-            null
-        }.whenever(commandQueue)
-            .tempBasalAbsolute(anyDouble(), anyInt(), anyBoolean(), anyOrNull(), anyOrNull(), any(Callback::class.java))
-        doAnswer { invocation: InvocationOnMock ->
-            val callback = invocation.getArgument<Callback>(2)
-            callback.result = pumpEnactResultProvider.get().success(true).isPercent(false).absolute(invocation.getArgument(0)).duration(invocation.getArgument(1))
-            callback.run()
-            null
-        }.whenever(commandQueue).extendedBolus(anyDouble(), anyInt(), any(Callback::class.java))
+        runBlocking {
+            whenever(commandQueue.cancelTempBasal(anyBoolean(), anyBoolean())).thenReturn(pumpEnactResultProvider.get().success(true))
+            whenever(commandQueue.cancelExtended()).thenReturn(pumpEnactResultProvider.get().success(true))
+            whenever(commandQueue.readStatus(anyString())).thenReturn(pumpEnactResultProvider.get().success(true))
+            whenever(commandQueue.bolus(anyOrNull())).thenReturn(pumpEnactResultProvider.get().success(true).bolusDelivered(1.0))
+            whenever(commandQueue.tempBasalPercent(anyInt(), anyInt(), anyBoolean(), anyOrNull(), anyOrNull())).thenAnswer { invocation ->
+                pumpEnactResultProvider.get().success(true).isPercent(true).percent(invocation.getArgument(0)).duration(invocation.getArgument(1))
+            }
+            whenever(commandQueue.tempBasalAbsolute(anyDouble(), anyInt(), anyBoolean(), anyOrNull(), anyOrNull())).thenAnswer { invocation ->
+                pumpEnactResultProvider.get().success(true).isPercent(false).absolute(invocation.getArgument(0)).duration(invocation.getArgument(1))
+            }
+            whenever(commandQueue.extendedBolus(anyDouble(), anyInt())).thenAnswer { invocation ->
+                pumpEnactResultProvider.get().success(true).isPercent(false).absolute(invocation.getArgument(0)).duration(invocation.getArgument(1))
+            }
+        }
 
         runBlocking { whenever(iobCobCalculator.calculateIobFromBolus()).thenReturn(IobTotal(0)) }
         runBlocking { whenever(iobCobCalculator.calculateIobFromTempBasalsIncludingConvertedExtended()).thenReturn(IobTotal(0)) }
 
-        whenever(localProfileManager.profile).thenReturn(getValidProfileStore())
         runBlocking { whenever(profileFunction.getProfile()).thenReturn(effectiveProfile) }
         runBlocking { whenever(pumpStatusProvider.shortStatus(anyBoolean())).thenReturn(testPumpPlugin.pumpSpecificShortStatus(true)) }
         whenever(otp.name()).thenReturn("User")
@@ -244,6 +219,7 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
         whenever(rh.gsNotLocalised(R.string.smscommunicator_tempbasal_canceled)).thenReturn("Temp basal canceled")
         whenever(rh.gsNotLocalised(R.string.smscommunicator_calibration_sent)).thenReturn("Calibration sent. Receiving must be enabled in xDrip+.")
         whenever(rh.gsNotLocalised(R.string.smscommunicator_tt_canceled)).thenReturn("Temp Target canceled successfully")
+        whenever(rh.gsNotLocalised(R.string.smscommunicator_extended_canceled)).thenReturn("Extended bolus canceled")
         whenever(rh.gs(app.aaps.core.ui.R.string.closedloop)).thenReturn(modeClosed)
         whenever(rh.gs(app.aaps.core.ui.R.string.openloop)).thenReturn(modeOpen)
         whenever(rh.gs(app.aaps.core.ui.R.string.lowglucosesuspend)).thenReturn(modeLgs)
@@ -270,7 +246,9 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
             requester = Sms("1234", "ddd"),
             requestText = "RequestText",
             confirmCode = "ccode",
-            action = object : SmsAction(false) { override suspend fun run() {} },
+            action = object : SmsAction(false) {
+                override suspend fun run() {}
+            },
             aapsLogger = aapsLogger,
             smsCommunicator = smsCommunicatorPlugin,
             rh = rh,
@@ -718,14 +696,14 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
         assertThat(smsCommunicatorPlugin.messages[1].text).isEqualTo("Wrong format")
 
         //PROFILE LIST (no profile defined)
-        whenever(localProfileManager.profile).thenReturn(null)
+        whenever(profileRepository.profile).thenReturn(MutableStateFlow(null))
         smsCommunicatorPlugin.messages = ArrayList()
         sms = Sms("1234", "PROFILE LIST")
         smsCommunicatorPlugin.processSms(sms)
         assertThat(smsCommunicatorPlugin.messages[0].text).isEqualTo("PROFILE LIST")
         assertThat(smsCommunicatorPlugin.messages[1].text).isEqualTo("Not configured")
 
-        whenever(localProfileManager.profile).thenReturn(getValidProfileStore())
+        whenever(profileRepository.profile).thenReturn(MutableStateFlow(getValidProfileStore()))
         runBlocking { whenever(profileFunction.getProfileName()).thenReturn(TESTPROFILENAME) }
 
         //PROFILE STATUS
@@ -1019,6 +997,7 @@ class SmsCommunicatorPluginTest : TestBaseWithProfile() {
         assertThat(smsCommunicatorPlugin.messages[0].text).isEqualTo("BOLUS 1")
         assertThat(smsCommunicatorPlugin.messages[1].text).isEqualTo("Pump suspended")
         testPumpPlugin.pumpSuspended = false
+        whenever(loop.runningMode()).thenReturn(RM.Mode.CLOSED_LOOP)
 
         //BOLUS 1 a
         smsCommunicatorPlugin.messages = ArrayList()

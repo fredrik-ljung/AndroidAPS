@@ -2,6 +2,7 @@ package app.aaps.plugins.sync.smsCommunicator
 
 import android.Manifest
 import android.content.Context
+import android.os.Bundle
 import android.telephony.SmsManager
 import android.telephony.SmsMessage
 import androidx.work.WorkerParameters
@@ -31,11 +32,10 @@ import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PermissionGroup
 import app.aaps.core.interfaces.plugin.PluginBaseWithPreferences
 import app.aaps.core.interfaces.plugin.PluginDescription
-import app.aaps.core.interfaces.profile.LocalProfileManager
 import app.aaps.core.interfaces.profile.ProfileFunction
+import app.aaps.core.interfaces.profile.ProfileRepository
 import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.pump.PumpStatusProvider
-import app.aaps.core.interfaces.queue.Callback
 import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
@@ -54,13 +54,14 @@ import app.aaps.core.keys.interfaces.withCompose
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.core.objects.extensions.generateCOBString
 import app.aaps.core.objects.extensions.round
+import app.aaps.core.objects.runningMode.PumpCommandGate
 import app.aaps.core.objects.runningMode.RunningModeGuard
-import app.aaps.core.objects.runningMode.TbrGate
 import app.aaps.core.objects.workflow.LoggingWorker
 import app.aaps.core.ui.compose.ComposeScreenContent
 import app.aaps.core.ui.compose.icons.IcPluginSms
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
-import app.aaps.core.utils.receivers.DataWorkerStorage
+import app.aaps.core.utils.receivers.DataInbox
+import app.aaps.core.utils.receivers.Inbox
 import app.aaps.plugins.sync.R
 import app.aaps.plugins.sync.smsCommunicator.actions.BasalCancelAction
 import app.aaps.plugins.sync.smsCommunicator.actions.BolusAction
@@ -117,7 +118,7 @@ class SmsCommunicatorPlugin @Inject constructor(
     private val profileUtil: ProfileUtil,
     private val activePlugin: ActivePlugin,
     private val insulin: Insulin,
-    private val localProfileManager: LocalProfileManager,
+    private val profileRepository: ProfileRepository,
     private val commandQueue: CommandQueue,
     private val loop: Loop,
     private val iobCobCalculator: IobCobCalculator,
@@ -188,7 +189,7 @@ class SmsCommunicatorPlugin @Inject constructor(
         )
     )
 
-    override fun onStart() {
+    override suspend fun onStart() {
         processSettings()
         super.onStart()
         val newScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -199,7 +200,7 @@ class SmsCommunicatorPlugin @Inject constructor(
             .launchIn(newScope)
     }
 
-    override fun onStop() {
+    override suspend fun onStop() {
         scope?.cancel()
         scope = null
         super.onStop()
@@ -212,19 +213,33 @@ class SmsCommunicatorPlugin @Inject constructor(
     ) : LoggingWorker(context, params, Dispatchers.IO) {
 
         @Inject lateinit var smsCommunicatorPlugin: SmsCommunicatorPlugin
-        @Inject lateinit var dataWorkerStorage: DataWorkerStorage
+        @Inject lateinit var dataInbox: DataInbox
 
         override suspend fun doWorkAndLog(): Result {
-            val bundle = dataWorkerStorage.pickupBundle(inputData.getLong(DataWorkerStorage.STORE_KEY, -1))
-                ?: return Result.failure(workDataOf("Error" to "missing input data"))
-            val format = bundle.getString("format")
-                ?: return Result.failure(workDataOf("Error" to "missing format in input data"))
+            val bundles = dataInbox.drain(SmsInbox)
+            if (bundles.isEmpty()) return Result.success(workDataOf("Result" to "no data"))
+            var hadFailure = false
+            for (bundle in bundles) {
+                try {
+                    processBundle(bundle)
+                } catch (e: Exception) {
+                    aapsLogger.error(LTag.SMS, "Failed processing SMS bundle", e)
+                    hadFailure = true
+                }
+            }
+            return if (hadFailure) Result.failure(workDataOf("Error" to "one or more bundles failed")) else Result.success()
+        }
+
+        private suspend fun processBundle(bundle: Bundle) {
+            val format = bundle.getString("format") ?: run {
+                aapsLogger.warn(LTag.SMS, "Skipping SMS bundle: missing format")
+                return
+            }
             @Suppress("DEPRECATION") val pdus = bundle["pdus"] as Array<*>
             for (pdu in pdus) {
                 val message = SmsMessage.createFromPdu(pdu as ByteArray, format)
                 smsCommunicatorPlugin.processSms(Sms(message))
             }
-            return Result.success()
         }
     }
 
@@ -315,7 +330,6 @@ class SmsCommunicatorPlugin @Inject constructor(
                     if (!remoteCommandsAllowed) sendSMS(Sms(receivedSms.phoneNumber, rh.gs(R.string.smscommunicator_remote_command_not_allowed)))
                     else if (commandQueue.bolusInQueue()) sendSMS(Sms(receivedSms.phoneNumber, rh.gs(R.string.smscommunicator_another_bolus_in_queue)))
                     else if (divided.size == 2 && dateUtil.now() - lastRemoteBolusTime < minDistance) sendSMS(Sms(receivedSms.phoneNumber, rh.gs(R.string.smscommunicator_remote_bolus_not_allowed)))
-                    else if (divided.size == 2 && loop.runningMode().isSuspended()) sendSMS(Sms(receivedSms.phoneNumber, rh.gs(app.aaps.core.ui.R.string.pumpsuspended)))
                     else if (divided.size == 2 || divided.size == 3) processBOLUS(divided, receivedSms)
                     else sendSMS(Sms(receivedSms.phoneNumber, rh.gs(R.string.wrong_format)))
 
@@ -573,17 +587,14 @@ class SmsCommunicatorPlugin @Inject constructor(
 
     private suspend fun processPUMP(divided: Array<String>, receivedSms: Sms) {
         if (divided.size == 1) {
-            commandQueue.readStatus(rh.gs(app.aaps.core.ui.R.string.sms), object : Callback() {
-                override fun run() {
-                    if (result.success) {
-                        val reply = shortStatusBlocking()
-                        sendSMS(Sms(receivedSms.phoneNumber, reply))
-                    } else {
-                        val reply = rh.gs(R.string.sms_read_status_failed)
-                        sendSMS(Sms(receivedSms.phoneNumber, reply))
-                    }
-                }
-            })
+            val result = commandQueue.readStatus(rh.gs(app.aaps.core.ui.R.string.sms))
+            if (result.success) {
+                val reply = shortStatusBlocking()
+                sendSMS(Sms(receivedSms.phoneNumber, reply))
+            } else {
+                val reply = rh.gs(R.string.sms_read_status_failed)
+                sendSMS(Sms(receivedSms.phoneNumber, reply))
+            }
             receivedSms.processed = true
         } else if ((divided.size == 2) && (divided[1].equals("CONNECT", ignoreCase = true))) {
             if (loop.allowedNextModes().contains(RM.Mode.RESUME)) {
@@ -635,7 +646,7 @@ class SmsCommunicatorPlugin @Inject constructor(
     }
 
     private suspend fun processPROFILE(divided: Array<String>, receivedSms: Sms) { // load profiles
-        val store = localProfileManager.profile
+        val store = profileRepository.profile.value
         if (store == null) {
             sendSMS(Sms(receivedSms.phoneNumber, rh.gs(app.aaps.core.ui.R.string.notconfigured)))
             receivedSms.processed = true
@@ -719,8 +730,8 @@ class SmsCommunicatorPlugin @Inject constructor(
             else if (duration <= 0 || duration % durationStep != 0) sendSMS(Sms(receivedSms.phoneNumber, rh.gs(R.string.sms_wrong_tbr_duration, durationStep)))
             else {
                 tempBasalPct = constraintChecker.applyBasalPercentConstraints(ConstraintObject(tempBasalPct, aapsLogger), profile).value()
-                val gateKind = if (tempBasalPct == 0) TbrGate.CommandKind.TEMP_BASAL_ZERO
-                else TbrGate.CommandKind.TEMP_BASAL_NONZERO
+                val gateKind = if (tempBasalPct == 0) PumpCommandGate.CommandKind.TEMP_BASAL_ZERO
+                else PumpCommandGate.CommandKind.TEMP_BASAL_NONZERO
                 val gateReject = runningModeGuard.rejectionMessage(gateKind)
                 if (gateReject != null) {
                     sendSMS(Sms(receivedSms.phoneNumber, gateReject))
@@ -757,8 +768,8 @@ class SmsCommunicatorPlugin @Inject constructor(
             else if (duration <= 0 || duration % durationStep != 0) sendSMS(Sms(receivedSms.phoneNumber, rh.gs(R.string.sms_wrong_tbr_duration, durationStep)))
             else {
                 tempBasal = constraintChecker.applyBasalConstraints(ConstraintObject(tempBasal, aapsLogger), profile).value()
-                val gateKind = if (tempBasal == 0.0) TbrGate.CommandKind.TEMP_BASAL_ZERO
-                else TbrGate.CommandKind.TEMP_BASAL_NONZERO
+                val gateKind = if (tempBasal == 0.0) PumpCommandGate.CommandKind.TEMP_BASAL_ZERO
+                else PumpCommandGate.CommandKind.TEMP_BASAL_NONZERO
                 val gateReject = runningModeGuard.rejectionMessage(gateKind)
                 if (gateReject != null) {
                     sendSMS(Sms(receivedSms.phoneNumber, gateReject))
@@ -787,7 +798,7 @@ class SmsCommunicatorPlugin @Inject constructor(
         }
     }
 
-    private fun processEXTENDED(divided: Array<String>, receivedSms: Sms) {
+    private suspend fun processEXTENDED(divided: Array<String>, receivedSms: Sms) {
         if (divided[1].uppercase(Locale.getDefault()) == "CANCEL" || divided[1].uppercase(Locale.getDefault()) == "STOP") {
             val passCode = generatePassCode()
             val reply = rh.gs(R.string.smscommunicator_extended_stop_reply_with_code, passCode)
@@ -812,7 +823,7 @@ class SmsCommunicatorPlugin @Inject constructor(
             extended = constraintChecker.applyExtendedBolusConstraints(ConstraintObject(extended, aapsLogger)).value()
             if (extended == 0.0 || duration == 0) sendSMS(Sms(receivedSms.phoneNumber, rh.gs(R.string.wrong_format)))
             else {
-                val gateReject = runningModeGuard.rejectionMessage(TbrGate.CommandKind.EXTENDED_BOLUS)
+                val gateReject = runningModeGuard.rejectionMessage(PumpCommandGate.CommandKind.EXTENDED_BOLUS)
                 if (gateReject != null) {
                     sendSMS(Sms(receivedSms.phoneNumber, gateReject))
                     receivedSms.processed = true
@@ -840,14 +851,14 @@ class SmsCommunicatorPlugin @Inject constructor(
         }
     }
 
-    private fun processBOLUS(divided: Array<String>, receivedSms: Sms) {
+    private suspend fun processBOLUS(divided: Array<String>, receivedSms: Sms) {
         var bolus = SafeParse.stringToDouble(divided[1])
         val isMeal = divided.size > 2 && divided[2].equals("MEAL", ignoreCase = true)
         bolus = constraintChecker.applyBolusConstraints(ConstraintObject(bolus, aapsLogger)).value()
         if (divided.size == 3 && !isMeal) {
             sendSMS(Sms(receivedSms.phoneNumber, rh.gs(R.string.wrong_format)))
         } else if (bolus > 0.0) {
-            val gateReject = runningModeGuard.rejectionMessage(TbrGate.CommandKind.BOLUS)
+            val gateReject = runningModeGuard.rejectionMessage(PumpCommandGate.CommandKind.BOLUS)
             if (gateReject != null) {
                 sendSMS(Sms(receivedSms.phoneNumber, gateReject))
                 receivedSms.processed = true
@@ -1122,3 +1133,5 @@ class SmsCommunicatorPlugin @Inject constructor(
         icon = pluginDescription.icon
     )
 }
+
+object SmsInbox : Inbox<Bundle>("sms-received", SmsCommunicatorPlugin.SmsCommunicatorWorker::class.java)

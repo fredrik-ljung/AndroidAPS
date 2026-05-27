@@ -57,9 +57,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.aaps.core.data.model.ICfg
 import app.aaps.core.ui.compose.AapsTopAppBar
 import app.aaps.core.ui.compose.DateTimeSection
-import app.aaps.core.ui.compose.bottomBarSafeArea
 import app.aaps.core.ui.compose.NumberInputRow
+import app.aaps.core.ui.compose.bottomBarSafeArea
 import app.aaps.core.ui.compose.clearFocusOnTap
+import app.aaps.core.ui.compose.consumeOverscroll
 import app.aaps.core.ui.compose.dialogs.OkCancelDialog
 import app.aaps.core.ui.compose.navigation.ElementType
 import app.aaps.core.ui.compose.navigation.color
@@ -71,9 +72,9 @@ import app.aaps.core.ui.compose.preference.ProvidePreferenceTheme
 import app.aaps.ui.compose.EventDatePicker
 import app.aaps.ui.compose.EventTimePicker
 import app.aaps.ui.compose.components.DialogStatusBar
+import app.aaps.ui.compose.overview.chips.CobUiState
+import app.aaps.ui.compose.overview.chips.IobUiState
 import app.aaps.ui.compose.overview.graphs.BgInfoUiState
-import app.aaps.ui.compose.overview.graphs.CobUiState
-import app.aaps.ui.compose.overview.graphs.IobUiState
 import kotlinx.coroutines.flow.StateFlow
 import java.text.DecimalFormat
 import app.aaps.core.keys.R as KeysR
@@ -290,6 +291,7 @@ private fun InsulinDialogContent(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .consumeOverscroll()
                 .verticalScroll(rememberScrollState())
                 .clearFocusOnTap(focusManager)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -532,6 +534,8 @@ private fun InsulinQuickAddButtons(
     val increments = listOf(increment1, increment2, increment3).filter { it != 0.0 }
     if (increments.isEmpty()) return
 
+    val focusManager = LocalFocusManager.current
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -540,7 +544,10 @@ private fun InsulinQuickAddButtons(
         increments.forEach { amount ->
             val formatted = formatAmount(amount)
             val label = if (amount > 0) "+$formatted" else formatted
-            FilledTonalButton(onClick = { onAddInsulin(amount) }) {
+            FilledTonalButton(onClick = {
+                focusManager.clearFocus()
+                onAddInsulin(amount)
+            }) {
                 Text(label)
             }
         }

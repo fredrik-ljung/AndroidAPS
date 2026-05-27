@@ -24,13 +24,13 @@ import app.aaps.core.ui.compose.icons.IcSettingsOff
 import app.aaps.core.ui.compose.navigation.ElementType
 import app.aaps.core.ui.compose.navigation.NavigationRequest
 import app.aaps.ui.compose.main.TempTargetChipState
+import app.aaps.ui.compose.overview.chips.CobUiState
 import app.aaps.ui.compose.overview.chips.IobCobChipsRow
+import app.aaps.ui.compose.overview.chips.IobUiState
 import app.aaps.ui.compose.overview.chips.ProfileChip
 import app.aaps.ui.compose.overview.chips.RunningModeChip
 import app.aaps.ui.compose.overview.chips.TbrChip
 import app.aaps.ui.compose.overview.chips.TempTargetChip
-import app.aaps.ui.compose.overview.graphs.CobUiState
-import app.aaps.ui.compose.overview.graphs.IobUiState
 
 @Composable
 fun OverviewChipsColumn(
@@ -38,6 +38,7 @@ fun OverviewChipsColumn(
     runningModeText: String,
     runningModeProgress: Float,
     runningModeSceneManaged: Boolean = false,
+    smbEnabled: Boolean = false,
     isSimpleMode: Boolean,
     profileName: String,
     isProfileModified: Boolean,
@@ -76,6 +77,7 @@ fun OverviewChipsColumn(
                             runningModeText = runningModeText,
                             runningModeProgress = runningModeProgress,
                             runningModeSceneManaged = runningModeSceneManaged,
+                            smbEnabled = smbEnabled,
                             isSimpleMode = isSimpleMode,
                             profileName = profileName,
                             isProfileModified = isProfileModified,
@@ -103,6 +105,7 @@ fun OverviewChipsColumn(
                 runningModeText = runningModeText,
                 runningModeProgress = runningModeProgress,
                 runningModeSceneManaged = runningModeSceneManaged,
+                smbEnabled = smbEnabled,
                 isSimpleMode = isSimpleMode,
                 profileName = profileName,
                 isProfileModified = isProfileModified,
@@ -131,6 +134,7 @@ private fun NarrowChips(
     runningModeText: String,
     runningModeProgress: Float,
     runningModeSceneManaged: Boolean,
+    smbEnabled: Boolean,
     isSimpleMode: Boolean,
     profileName: String,
     isProfileModified: Boolean,
@@ -153,6 +157,7 @@ private fun NarrowChips(
                 progress = runningModeProgress,
                 modifier = Modifier.weight(1f),
                 sceneManaged = runningModeSceneManaged,
+                smbEnabled = smbEnabled,
                 onClick = { onNavigate(NavigationRequest.Element(ElementType.RUNNING_MODE)) }
             )
             if (isSimpleMode) {
@@ -167,15 +172,14 @@ private fun NarrowChips(
             }
         }
     }
-    if (profileName.isNotEmpty()) {
-        ProfileChip(
-            profileName = profileName,
-            isModified = isProfileModified,
-            progress = profileProgress,
-            onClick = { onNavigate(NavigationRequest.Element(ElementType.PROFILE_MANAGEMENT)) },
-            sceneManaged = profileSceneManaged
-        )
-    }
+    ProfileChip(
+        profileName = profileName.ifEmpty { stringResource(app.aaps.core.ui.R.string.no_profile_set) },
+        isModified = isProfileModified,
+        progress = profileProgress,
+        onClick = { onNavigate(NavigationRequest.Element(ElementType.PROFILE_MANAGEMENT)) },
+        sceneManaged = profileSceneManaged,
+        isNoProfile = profileName.isEmpty()
+    )
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(AapsSpacing.small)

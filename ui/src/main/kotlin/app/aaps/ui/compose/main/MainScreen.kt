@@ -36,33 +36,37 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.aaps.core.interfaces.notifications.AapsNotification
 import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.pump.BolusProgressState
+import app.aaps.core.ui.R
 import app.aaps.core.ui.compose.LocalDateUtil
 import app.aaps.core.ui.compose.LocalSnackbarHostState
 import app.aaps.core.ui.compose.dialogs.OkCancelDialog
+import app.aaps.core.ui.compose.dialogs.ThreeButtonDialog
 import app.aaps.core.ui.compose.navigation.ElementType
 import app.aaps.core.ui.compose.navigation.NavigationRequest
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
-import app.aaps.ui.compose.alertDialogs.AboutAlertDialog
-import app.aaps.ui.compose.alertDialogs.AboutDialogData
-import app.aaps.ui.compose.scenesSheet.ScenesBottomSheet
-import app.aaps.ui.compose.scenesSheet.ScenesViewModel
+import app.aaps.ui.compose.aboutDialog.AboutAlertDialog
+import app.aaps.ui.compose.aboutDialog.AboutDialogData
 import app.aaps.ui.compose.maintenance.ImportSource
 import app.aaps.ui.compose.maintenance.MaintenanceDialogs
 import app.aaps.ui.compose.maintenance.MaintenanceViewModel
 import app.aaps.ui.compose.manageSheet.ManageSheetState
 import app.aaps.ui.compose.manageSheet.ManageViewModel
 import app.aaps.ui.compose.overview.OverviewScreen
+import app.aaps.ui.compose.overview.chips.ChipsViewModel
 import app.aaps.ui.compose.overview.graphs.GraphViewModel
 import app.aaps.ui.compose.overview.statusLights.StatusViewModel
 import app.aaps.ui.compose.quickLaunch.QuickLaunchAction
 import app.aaps.ui.compose.quickLaunch.QuickLaunchToolbar
 import app.aaps.ui.compose.quickLaunch.ResolvedQuickLaunchItem
+import app.aaps.ui.compose.scenesSheet.ScenesBottomSheet
+import app.aaps.ui.compose.scenesSheet.ScenesViewModel
 import app.aaps.ui.compose.treatmentsSheet.TreatmentBottomSheet
 import app.aaps.ui.compose.treatmentsSheet.TreatmentViewModel
 import app.aaps.ui.search.SearchIndexEntry
@@ -124,6 +128,7 @@ fun MainScreen(
     onQuickLaunchActionClick: (QuickLaunchAction) -> Unit = {},
     calcProgress: Int,
     graphViewModel: GraphViewModel,
+    chipsViewModel: ChipsViewModel,
     statusLightsDef: PreferenceSubScreenDef,
     treatmentButtonsDef: PreferenceSubScreenDef,
     // Pump activity
@@ -238,9 +243,11 @@ fun MainScreen(
                         runningModeProgress = uiState.runningModeProgress,
                         runningModeRecordId = uiState.runningModeRecordId,
                         tbrState = uiState.tbrState,
+                        smbEnabled = uiState.smbEnabled,
                         isSimpleMode = uiState.isSimpleMode,
                         calcProgress = calcProgress,
                         graphViewModel = graphViewModel,
+                        chipsViewModel = chipsViewModel,
                         manageViewModel = manageViewModel,
                         statusViewModel = statusViewModel,
                         statusLightsDef = statusLightsDef,
@@ -327,7 +334,12 @@ fun MainScreen(
                             onSearchQueryChange = onSearchQueryChange,
                             onSearchClear = onSearchClear,
                             onSearchActiveChange = onSearchActiveChange,
-                            modifier = Modifier.onSizeChanged { topBarHeightPx = it.height }
+                            // Guard against transient 0 heights during AnimatedVisibility exit:
+                            // the resulting contentPadding invalidation can schedule a remeasure
+                            // on a node that's losing its owner — crashes in dispatchDraw.
+                            modifier = Modifier.onSizeChanged {
+                                if (it.height > 0 && it.height != topBarHeightPx) topBarHeightPx = it.height
+                            }
                         )
                     }
 
@@ -352,7 +364,12 @@ fun MainScreen(
                                 scenesViewModel.refreshState()
                                 showAutomationSheet = true
                             },
-                            automationCount = automationState.items.size + automationState.sceneItems.size,
+                            // Total drives nav-button visibility (button stays visible whenever
+                            // scenes/automation exist, even if currently un-activatable).
+                            // Count drives the badge — only items the user can act on right now.
+                            automationTotal = automationState.items.size + automationState.sceneItems.size,
+                            automationCount = automationState.items.count { it.activationReason == null } +
+                                automationState.sceneItems.count { it.activationReason == null },
                             pumpSetupPlugin = pumpSetupPlugin,
                             bgSetupPlugin = bgSetupPlugin,
                             bgQualityBadgeIcon = bgQualityBadgeIcon,
@@ -365,7 +382,9 @@ fun MainScreen(
                             onPermissionsClick = onPermissionsClick,
                             loopActionAvailable = loopActionState.actionAvailable,
                             onLoopActionClick = { showLoopActionSheet = true },
-                            modifier = Modifier.onSizeChanged { bottomBarHeightPx = it.height }
+                            modifier = Modifier.onSizeChanged {
+                                if (it.height > 0 && it.height != bottomBarHeightPx) bottomBarHeightPx = it.height
+                            }
                         )
                     }
 
@@ -443,15 +462,31 @@ fun MainScreen(
         )
     }
 
-    // Shared confirmation dialog (automation actions, TT presets — from toolbar or bottom sheets)
+    // Shared confirmation dialog (automation actions, TT presets, scene end — from toolbar or
+    // bottom sheets). When the confirmation carries a secondary action (e.g., scene chain skip),
+    // render a 3-button dialog; otherwise the standard 2-button OK/Cancel.
     val actionConfirmation by mainViewModel.actionConfirmation.collectAsStateWithLifecycle()
     actionConfirmation?.let { confirmation ->
-        OkCancelDialog(
-            title = confirmation.title,
-            message = confirmation.message,
-            onConfirm = { mainViewModel.executeConfirmableAction(confirmation.onConfirmAction) },
-            onDismiss = { mainViewModel.dismissActionConfirmation() }
-        )
+        val secondaryAction = confirmation.secondaryAction
+        val secondaryLabel = confirmation.secondaryLabel
+        if (secondaryAction != null && secondaryLabel != null) {
+            ThreeButtonDialog(
+                title = confirmation.title,
+                message = confirmation.message,
+                primaryLabel = confirmation.confirmLabel ?: stringResource(R.string.ok),
+                onPrimary = { mainViewModel.executeConfirmableAction(confirmation.onConfirmAction) },
+                secondaryLabel = secondaryLabel,
+                onSecondary = { mainViewModel.executeConfirmableAction(secondaryAction) },
+                onDismiss = { mainViewModel.dismissActionConfirmation() }
+            )
+        } else {
+            OkCancelDialog(
+                title = confirmation.title,
+                message = confirmation.message,
+                onConfirm = { mainViewModel.executeConfirmableAction(confirmation.onConfirmAction) },
+                onDismiss = { mainViewModel.dismissActionConfirmation() }
+            )
+        }
     }
 
     // Maintenance dialogs (sheets, confirmations, export chain)
