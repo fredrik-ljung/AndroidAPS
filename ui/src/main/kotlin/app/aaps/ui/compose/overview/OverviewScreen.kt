@@ -1,5 +1,6 @@
 package app.aaps.ui.compose.overview
 
+import android.content.res.Configuration
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
@@ -51,6 +52,7 @@ fun OverviewScreen(
     tempTargetRecordId: Long = 0,
     runningMode: RM.Mode,
     runningModeText: String,
+    runningModeRemaining: String,
     runningModeProgress: Float,
     runningModeRecordId: Long = 0,
     tbrState: TbrState,
@@ -64,6 +66,7 @@ fun OverviewScreen(
     statusLightsDef: PreferenceSubScreenDef,
     onNavigate: (NavigationRequest) -> Unit,
     onTbrChipClick: () -> Unit,
+    onIobChipClick: () -> Unit,
     notifications: List<AapsNotification>,
     onDismissNotification: (AapsNotification) -> Unit,
     onNotificationActionClick: (AapsNotification) -> Unit,
@@ -108,7 +111,9 @@ fun OverviewScreen(
     val profileSceneManaged = activeSceneState?.priorState?.scenePsId
         ?.let { it == profilePsId && it > 0 } == true
 
-    val isTablet = LocalConfiguration.current.smallestScreenWidthDp >= TABLET_MIN_SW_DP
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val isTablet = configuration.smallestScreenWidthDp >= TABLET_MIN_SW_DP && isLandscape
 
     Box(modifier = modifier.fillMaxSize()) {
         if (isTablet) {
@@ -124,6 +129,7 @@ fun OverviewScreen(
                 tempTargetSceneManaged = tempTargetSceneManaged,
                 runningMode = runningMode,
                 runningModeText = runningModeText,
+                runningModeRemaining = runningModeRemaining,
                 runningModeProgress = runningModeProgress,
                 runningModeSceneManaged = runningModeSceneManaged,
                 tbrState = tbrState,
@@ -137,6 +143,7 @@ fun OverviewScreen(
                 statusLightsDef = statusLightsDef,
                 onNavigate = onNavigate,
                 onTbrChipClick = onTbrChipClick,
+                onIobChipClick = onIobChipClick,
                 paddingValues = paddingValues,
                 activeSceneState = activeSceneState,
                 sceneExpired = sceneExpired,
@@ -145,7 +152,7 @@ fun OverviewScreen(
                 formatDuration = formatDuration
             )
         } else BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            if (maxWidth >= SPLIT_LAYOUT_MIN_WIDTH) {
+            if (isLandscape && maxWidth >= SPLIT_LAYOUT_MIN_WIDTH) {
                 OverviewScreenSplit(
                     profileName = profileName,
                     isProfileModified = isProfileModified,
@@ -158,6 +165,7 @@ fun OverviewScreen(
                     tempTargetSceneManaged = tempTargetSceneManaged,
                     runningMode = runningMode,
                     runningModeText = runningModeText,
+                    runningModeRemaining = runningModeRemaining,
                     runningModeProgress = runningModeProgress,
                     runningModeSceneManaged = runningModeSceneManaged,
                     tbrState = tbrState,
@@ -171,6 +179,7 @@ fun OverviewScreen(
                     statusLightsDef = statusLightsDef,
                     onNavigate = onNavigate,
                     onTbrChipClick = onTbrChipClick,
+                    onIobChipClick = onIobChipClick,
                     paddingValues = paddingValues,
                     activeSceneState = activeSceneState,
                     sceneExpired = sceneExpired,
@@ -191,6 +200,7 @@ fun OverviewScreen(
                     tempTargetSceneManaged = tempTargetSceneManaged,
                     runningMode = runningMode,
                     runningModeText = runningModeText,
+                    runningModeRemaining = runningModeRemaining,
                     runningModeProgress = runningModeProgress,
                     runningModeSceneManaged = runningModeSceneManaged,
                     tbrState = tbrState,
@@ -204,6 +214,7 @@ fun OverviewScreen(
                     statusLightsDef = statusLightsDef,
                     onNavigate = onNavigate,
                     onTbrChipClick = onTbrChipClick,
+                    onIobChipClick = onIobChipClick,
                     paddingValues = paddingValues,
                     activeSceneState = activeSceneState,
                     sceneExpired = sceneExpired,

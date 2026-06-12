@@ -12,6 +12,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,6 +53,7 @@ import app.aaps.core.ui.compose.ComposablePluginContent
 import app.aaps.core.ui.compose.ScreenMode
 import app.aaps.core.ui.compose.ToolbarConfig
 import app.aaps.core.ui.compose.navigation.ElementType
+import app.aaps.core.ui.compose.navigation.LocalPluginNavigationRequest
 import app.aaps.core.ui.compose.navigation.NavigationRequest
 import app.aaps.core.ui.compose.preference.PluginPreferencesScreen
 import app.aaps.core.ui.compose.preference.PreferenceSubScreenDef
@@ -195,6 +197,7 @@ fun NavGraphBuilder.appNavGraph(
                     navController.navigate(AppRoute.ProfileActivation.createRoute(index))
                 }
             },
+            onAddProfile = { navController.navigate(AppRoute.ProfileEditorNew.route) },
             onInsulinManager = { navController.navigate(AppRoute.InsulinManagement.createRoute(mode)) }
         )
     }
@@ -402,9 +405,10 @@ fun NavGraphBuilder.appNavGraph(
             initialTimestamp = profileManagementViewModel.dateUtil.nowWithoutMilliseconds(),
             rh = rh,
             onNavigateBack = { navController.safePopBackStack() },
+            checkPumpCompatible = { percentage -> profileManagementViewModel.isPumpCompatible(profileIndex, percentage) },
             onActivate = { duration, percentage, timeshift, withTT, notes, timestamp, timeChanged ->
                 coroutineScope.launch {
-                    profileManagementViewModel.activateProfile(
+                    val success = profileManagementViewModel.activateProfile(
                         profileIndex = profileIndex,
                         durationMinutes = duration,
                         percentage = percentage,
@@ -414,7 +418,9 @@ fun NavGraphBuilder.appNavGraph(
                         timestamp = timestamp,
                         timeChanged = timeChanged
                     )
-                    navController.popBackStack(AppRoute.Profile.route, inclusive = false)
+                    if (success) {
+                        navController.popBackStack(AppRoute.Profile.route, inclusive = false)
+                    }
                 }
             }
         )
@@ -429,6 +435,20 @@ fun NavGraphBuilder.appNavGraph(
         LaunchedEffect(Unit) {
             if (!initialized.value) {
                 profileEditorViewModel.selectProfile(profileIndex)
+                initialized.value = true
+            }
+        }
+        ProfileEditorScreen(
+            viewModel = profileEditorViewModel,
+            onBackClick = { navController.safePopBackStack() }
+        )
+    }
+
+    composable(AppRoute.ProfileEditorNew.route) {
+        val initialized = rememberSaveable { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            if (!initialized.value) {
+                profileEditorViewModel.startNewProfileDraft()
                 initialized.value = true
             }
         }
@@ -732,16 +752,24 @@ private fun PluginContentRoute(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            composeContent.Render(
-                setToolbarConfig = { config -> toolbarConfig = config },
-                onNavigateBack = { navController.safePopBackStack() },
-                onSettings = {
-                    onNavigationRequest(
-                        NavigationRequest.PluginPreferences(plugin.javaClass.simpleName),
-                        navController
-                    )
-                }
-            )
+            // remember so the lambda identity stays stable across recompositions —
+            // otherwise CompositionLocalProvider invalidates every consumer in the subtree
+            // on every PluginContentRoute recomposition.
+            val navigationRequestLambda = remember(onNavigationRequest, navController) {
+                { request: NavigationRequest -> onNavigationRequest(request, navController) }
+            }
+            CompositionLocalProvider(LocalPluginNavigationRequest provides navigationRequestLambda) {
+                composeContent.Render(
+                    setToolbarConfig = { config -> toolbarConfig = config },
+                    onNavigateBack = { navController.safePopBackStack() },
+                    onSettings = {
+                        onNavigationRequest(
+                            NavigationRequest.PluginPreferences(plugin.javaClass.simpleName),
+                            navController
+                        )
+                    }
+                )
+            }
         }
     }
 }
