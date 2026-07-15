@@ -407,7 +407,8 @@ class OmnipodDashPumpPlugin @Inject constructor(
 
     override suspend fun setNewBasalProfile(profile: PumpProfile): PumpEnactResult {
         if (!podStateManager.isActivationCompleted) {
-            return pumpEnactResultProvider.get().success(true).enacted(true)
+            // Pod not activated yet — deferred, not an actual write. enacted=false => no PROFILE_SET_OK.
+            return pumpEnactResultProvider.get().success(true).enacted(false)
         }
         aapsLogger.debug(LTag.PUMP, "setNewBasalProfile profile=$profile")
         return setNewBasalProfile(profile, OmnipodCommandType.SET_BASAL_PROFILE)
@@ -438,25 +439,16 @@ class OmnipodDashPumpPlugin @Inject constructor(
 
     private fun failWhenUnconfirmed(deliverySuspended: Boolean): Completable = Completable.defer {
         if (podStateManager.activeCommand != null) {
-            if (deliverySuspended) {
-                showNotification(
-                    NotificationId.FAILED_UPDATE_PROFILE,
-                    rh.gs(R.string.failed_to_set_the_new_basal_profile),
-                    app.aaps.core.ui.R.raw.boluserror,
-                    level = NotificationLevel.IMPORTANT
+            // FAILED_UPDATE_PROFILE is posted centrally (onProfileChanged) from success=false; carry the specific
+            // reason in the exception so result.comment surfaces it there.
+            Completable.error(
+                java.lang.IllegalStateException(
+                    if (deliverySuspended) rh.gs(R.string.failed_to_set_the_new_basal_profile)
+                    else rh.gs(R.string.setting_basal_profile_might_have_failed)
                 )
-            } else {
-                showNotification(
-                    NotificationId.FAILED_UPDATE_PROFILE,
-                    rh.gs(R.string.setting_basal_profile_might_have_failed),
-                    app.aaps.core.ui.R.raw.boluserror,
-                    level = NotificationLevel.IMPORTANT
-                )
-            }
-            Completable.error(java.lang.IllegalStateException("Command not confirmed"))
+            )
         } else {
-            notificationManager.post(NotificationId.PROFILE_SET_OK, R.string.profile_set_ok)
-
+            // PROFILE_SET_OK posted centrally (onProfileChanged) on success && enacted.
             Completable.complete()
         }
     }
@@ -521,6 +513,9 @@ class OmnipodDashPumpPlugin @Inject constructor(
 
         val requestedInsulinAmount = PodConstants.POD_PULSE_BOLUS_UNITS
 
+        // Same staleness guard as deliverTreatment: refresh the reservoir from the current pod state so a freshly
+        // activated pod (whose _reservoirLevel is still the 0.0 init until the next getPumpStatus) isn't wrongly skipped.
+        syncPumpFlows()
         val availableInsulin = reservoirLevel.value.cU
         if (requestedInsulinAmount > availableInsulin) {
             aapsLogger.info(LTag.PUMP, "Basal correction skipped: not enough insulin in reservoir ($requestedInsulinAmount > $availableInsulin)")
@@ -643,6 +638,11 @@ class OmnipodDashPumpPlugin @Inject constructor(
         try {
             bolusDeliveryInProgress = true
             aapsLogger.info(LTag.PUMP, "Delivering treatment: $detailedBolusInfo $bolusCanceled")
+            // Recompute the reservoir from the current pod state before the gate below. _reservoirLevel is otherwise
+            // refreshed only by getPumpStatus(), so right after a pod activation (no status poll yet) it is still its
+            // 0.0 init and the gate would falsely reject every bolus as "not enough insulin". podStateManager is the
+            // source of truth here (a full pod → pulsesRemaining null → the 75.0 fallback in syncPumpFlows).
+            syncPumpFlows()
             val requestedBolusAmount = detailedBolusInfo.insulin
             if (requestedBolusAmount > reservoirLevel.value.cU) {
                 return pumpEnactResultProvider.get()
@@ -1027,7 +1027,9 @@ class OmnipodDashPumpPlugin @Inject constructor(
             .doOnError { throwable ->
                 aapsLogger.error(LTag.PUMP, "toPumpEnactResult, error executing command: $throwable")
             }
-            .onErrorReturnItem(pumpEnactResultProvider.get().success(false).enacted(false))
+            // Carry the failure reason (e.g. failWhenUnconfirmed's specific string) into comment so the central
+            // FAILED_UPDATE_PROFILE handler surfaces it instead of the generic fallback.
+            .onErrorReturn { throwable -> pumpEnactResultProvider.get().success(false).enacted(false).comment(throwable.message ?: "") }
             .blockingGet()
     }
 

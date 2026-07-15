@@ -28,6 +28,7 @@ import app.aaps.core.interfaces.plugin.OwnDatabasePlugin
 import app.aaps.core.interfaces.pump.PumpSync
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.sync.DataSyncSelectorXdrip
+import app.aaps.core.interfaces.sync.NsClient
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -68,7 +69,8 @@ class MaintenanceViewModel @Inject constructor(
     private val pumpSync: PumpSync,
     private val iobCobCalculator: IobCobCalculator,
     private val overviewData: OverviewData,
-    private val overviewDataCache: OverviewDataCache
+    private val overviewDataCache: OverviewDataCache,
+    private val nsClient: NsClient
 ) : ViewModel() {
 
     private val _events = MutableSharedFlow<MaintenanceEvent>()
@@ -86,9 +88,12 @@ class MaintenanceViewModel @Inject constructor(
     }
 
     fun refreshExportConfig() {
-        viewModelScope.launch(Dispatchers.IO) {
-            _exportConfig.value = importExportPrefs.getExportConfig()
-            _isDirectoryAccessGranted.value = fileListProvider.isDirectoryAccessGranted()
+        viewModelScope.launch {
+            val (config, accessGranted) = withContext(Dispatchers.IO) {
+                importExportPrefs.getExportConfig() to fileListProvider.isDirectoryAccessGranted()
+            }
+            _exportConfig.value = config
+            _isDirectoryAccessGranted.value = accessGranted
         }
     }
 
@@ -201,7 +206,7 @@ class MaintenanceViewModel @Inject constructor(
                     for (plugin in activePlugin.getSpecificPluginsListByInterface(OwnDatabasePlugin::class.java)) {
                         (plugin as OwnDatabasePlugin).clearAllTables()
                     }
-                    activePlugin.activeNsClient?.dataSyncSelector?.resetToNextFullSync()
+                    nsClient.dataSyncSelector.resetToNextFullSync()
                     dataSyncSelectorXdrip.resetToNextFullSync()
                     pumpSync.connectNewPump()
                     overviewDataCache.reset()
@@ -381,7 +386,7 @@ class MaintenanceViewModel @Inject constructor(
             val cloudDisplayName: String? = null
         ) : ExportState
 
-        data object AskPassword : ExportState
+        data class AskPassword(val wrongPassword: Boolean = false) : ExportState
     }
 
     private val _exportState = MutableStateFlow<ExportState>(ExportState.Idle)
@@ -416,10 +421,17 @@ class MaintenanceViewModel @Inject constructor(
     }
 
     fun onExportConfirmed() {
-        _exportState.value = ExportState.AskPassword
+        _exportState.value = ExportState.AskPassword()
     }
 
     fun onExportPasswordEntered(password: String) {
+        // Settings are encrypted with the master password: reject anything that doesn't match it, otherwise
+        // the export (and any cached unattended-export password) would be encrypted with an arbitrary secret.
+        if (!importExportPrefs.isMasterPasswordCorrect(password)) {
+            // Re-show the dialog with an inline "wrong password" error — a snackbar would sit behind the dialog.
+            _exportState.value = ExportState.AskPassword(wrongPassword = true)
+            return
+        }
         _exportState.value = ExportState.Idle
         val cached = importExportPrefs.cacheExportPassword(password)
         doExport(cached)
