@@ -22,10 +22,15 @@ class EmulatorBleTransportTest {
     private val deviceName = "UHH00002TI"
     private val responses = mutableListOf<ByteArray>()
 
+    private var descriptorWrittenCount = 0
+
     private val listener = object : BleTransportListener {
         override fun onConnectionStateChanged(connected: Boolean) {}
         override fun onServicesDiscovered(success: Boolean) {}
-        override fun onDescriptorWritten() {}
+        override fun onDescriptorWritten() {
+            descriptorWrittenCount++
+        }
+
         override fun onCharacteristicChanged(data: ByteArray) {
             responses.add(data)
         }
@@ -39,6 +44,51 @@ class EmulatorBleTransportTest {
         transport.setListener(listener)
         appEncryption = BleEncryption()
         responses.clear()
+        descriptorWrittenCount = 0
+    }
+
+    /**
+     * BLEComm enables notifications twice per connection — eagerly in `connect()`, then again after service
+     * discovery. On hardware only the second completes: before discovery `uartRead` is null, so BleTransportImpl
+     * fabricates a bare characteristic whose CCCD lookup returns null and no `writeDescriptor` is issued. The
+     * emulator must match that, or the extra callback drives the pair wizard off its PIN step and hangs RSv3 pairing.
+     */
+    @Test
+    fun enableNotificationsBeforeDiscovery_doesNotCallBack() {
+        transport.gatt.connect("00:00:00:00:00:00")
+
+        transport.gatt.enableNotifications()
+
+        assertThat(descriptorWrittenCount).isEqualTo(0)
+    }
+
+    @Test
+    fun oneConnection_yieldsExactlyOneDescriptorWritten() {
+        transport.gatt.connect("00:00:00:00:00:00")
+
+        transport.gatt.enableNotifications()          // BLEComm.connect(), pre-discovery — no-op on hardware
+        transport.gatt.discoverServices()
+        transport.gatt.findCharacteristics()
+        transport.gatt.enableNotifications()          // findCharacteristic(), post-discovery — the real one
+
+        assertThat(descriptorWrittenCount).isEqualTo(1)
+    }
+
+    @Test
+    fun reconnect_registersNotificationsAgain() {
+        transport.gatt.connect("00:00:00:00:00:00")
+        transport.gatt.findCharacteristics()
+        transport.gatt.enableNotifications()
+        transport.gatt.disconnect()
+
+        // A new connection must discover again before notifications register, exactly like the first.
+        transport.gatt.connect("00:00:00:00:00:00")
+        transport.gatt.enableNotifications()
+        assertThat(descriptorWrittenCount).isEqualTo(1)
+
+        transport.gatt.findCharacteristics()
+        transport.gatt.enableNotifications()
+        assertThat(descriptorWrittenCount).isEqualTo(2)
     }
 
     @Test
@@ -109,6 +159,61 @@ class EmulatorBleTransportTest {
         assertThat(timeResponse).isNotNull()
         // Response should contain time info + encoded password (at least 8 bytes: type + opcode + 6 time + 2 password)
         assertThat(timeResponse!!.size).isAtLeast(8)
+    }
+
+    /**
+     * The v1 pairing key is sent from its own thread after a delay, so a disconnect can happen while
+     * it is in flight. It must then be dropped: `BLEComm` has torn its connection down and parsing a
+     * packet against it throws "Null decryptedInputBuffer" — from a thread nobody owns, so it takes
+     * down whatever is running at the time. That is what happened in CI build 40261, where the key
+     * from one test surfaced as a failure in the *next* one.
+     *
+     * The delay is deliberate, and long enough that the disconnect always wins: it makes the race
+     * the bug needed happen every run, rather than once in a while on a loaded CI box.
+     */
+    @Test
+    fun deferredPairingKeyIsDroppedWhenTheConnectionEndedFirst() {
+        transport.pairingDelayMs = 300
+        requestPairing()
+        // The immediate acknowledgement; the key itself is still pending on its thread.
+        assertThat(responses).hasSize(1)
+        responses.clear()
+
+        transport.gatt.disconnect()
+        transport.awaitPendingCallbacks()
+
+        assertThat(responses).isEmpty()
+    }
+
+    /** The same key must still arrive on a connection that is alive — the guard is not a mute. */
+    @Test
+    fun deferredPairingKeyIsDeliveredWhileConnected() {
+        transport.pairingDelayMs = 0
+        requestPairing()
+        transport.awaitPendingCallbacks()
+
+        // The acknowledgement, then the key.
+        assertThat(responses).hasSize(2)
+        val key = appEncryption.getDecryptedPacket(responses[1])
+        assertThat(key).isNotNull()
+        assertThat(key!![1]).isEqualTo(BleEncryption.DANAR_PACKET__OPCODE_ENCRYPTION__PASSKEY_RETURN.toByte())
+    }
+
+    /**
+     * Connect and ask to pair, leaving only the deferred key outstanding. PUMP_CHECK first, or the
+     * request is never decrypted — the app-side encryption has no session to send it under.
+     */
+    private fun requestPairing() {
+        transport.gatt.connect("00:00:00:00:00:00")
+        transport.gatt.writeCharacteristic(
+            appEncryption.getEncryptedPacket(BleEncryption.DANAR_PACKET__OPCODE_ENCRYPTION__PUMP_CHECK, null, deviceName)
+        )
+        appEncryption.getDecryptedPacket(responses.last())
+        responses.clear()
+
+        transport.gatt.writeCharacteristic(
+            appEncryption.getEncryptedPacket(BleEncryption.DANAR_PACKET__OPCODE_ENCRYPTION__PASSKEY_REQUEST, null, null)
+        )
     }
 
     @Test

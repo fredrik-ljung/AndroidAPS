@@ -87,7 +87,7 @@ import app.aaps.core.ui.compose.icons.IcBread
 import app.aaps.core.ui.compose.icons.IcCake
 import app.aaps.core.ui.compose.icons.IcPizza
 import app.aaps.core.ui.compose.icons.IcTtManual
-import app.aaps.core.ui.compose.navigation.ElementType
+import app.aaps.core.interfaces.navigation.ElementType
 import app.aaps.core.ui.compose.navigation.color
 import app.aaps.core.ui.compose.navigation.icon
 import app.aaps.core.ui.compose.navigation.labelResId
@@ -214,7 +214,7 @@ fun WizardDialogScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WizardDialogContent(
+internal fun WizardDialogContent(
     uiState: WizardDialogUiState,
     decimalFormatter: DecimalFormatter,
     profileUtil: ProfileUtil,
