@@ -24,7 +24,7 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import app.aaps.core.interfaces.overview.graph.SeriesType
+import app.aaps.core.data.ui.MarkerTier
 import com.patrykandpatrick.vico.compose.cartesian.CartesianDrawingContext
 import com.patrykandpatrick.vico.compose.cartesian.CartesianMeasuringContext
 import com.patrykandpatrick.vico.compose.cartesian.Scroll
@@ -98,6 +98,13 @@ fun timestampToX(timestamp: Long, minTimestamp: Long): Double =
     ((timestamp - minTimestamp) / 60000).toDouble()
 
 /**
+ * True when the axis of [timeRange] is longer than a window of [windowMinutes], so the graph can scroll. When it
+ * fits in the window, Vico's scroll limit (`maxValue`) stays 0.
+ */
+fun axisLongerThan(timeRange: Pair<Long, Long>, windowMinutes: Double): Boolean =
+    timestampToX(timeRange.second, timeRange.first) > windowMinutes
+
+/**
  * Creates a time formatter for X-axis labels showing hours (HH format).
  *
  * @param minTimestamp The reference timestamp for x-value calculation
@@ -105,14 +112,13 @@ fun timestampToX(timestamp: Long, minTimestamp: Long): Double =
  */
 @Composable
 fun rememberTimeFormatter(minTimestamp: Long): CartesianValueFormatter {
-    return remember(minTimestamp) {
+    val timeZone = TimeZone.currentSystemDefault()
+    return remember(minTimestamp, timeZone) {
         CartesianValueFormatter { _, value, _ ->
             val timestamp = minTimestamp + (value * 60000).toLong()
             // Always 24 hour, as SimpleDateFormat("HH") was: on an axis a bare 12 hour label would
             // not say which half of the day it belongs to.
-            Instant.fromEpochMilliseconds(timestamp)
-                .toLocalDateTime(TimeZone.currentSystemDefault())
-                .hour.toString().padStart(2, '0')
+            graphTimeLabel(timestamp, timeZone)
         }
     }
 }
@@ -128,9 +134,10 @@ fun rememberTimeFormatter(minTimestamp: Long): CartesianValueFormatter {
 @OptIn(ExperimentalTime::class)
 @Composable
 fun rememberBottomAxisItemPlacer(minTimestamp: Long): HorizontalAxis.ItemPlacer {
-    return remember(minTimestamp) {
+    val timeZone = TimeZone.currentSystemDefault()
+    return remember(minTimestamp, timeZone) {
         val instant = Instant.fromEpochMilliseconds(minTimestamp)
-        val localDateTime = instant.toLocalDateTime(TimeZone.currentSystemDefault())
+        val localDateTime = instant.toLocalDateTime(timeZone)
         val minutesIntoHour = localDateTime.minute
         val offsetToNextHour = if (minutesIntoHour == 0) 0 else 60 - minutesIntoHour
 
@@ -356,7 +363,8 @@ fun filterToRange(
 
 /**
  * Target point size for layout normalization across all synchronized graphs.
- * Must be >= the largest actual point size used in any graph (currently 22dp from IOB SMB/bolus markers).
+ * Must be >= the largest actual point size used in any graph (currently 30 dp: the largest BG graph
+ * marker, 22 dp, in a box grown by the tip gap on both sides, see `MARKER_TIP_GAP`).
  *
  * Every graph includes an invisible normalizer line with this point size (via [createNormalizerLine]).
  * This ensures all charts have the same maxPointSize, which makes Vico compute identical:
@@ -365,7 +373,7 @@ fun filterToRange(
  *
  * Without this, each chart's different point sizes cause different layout, breaking pixel-based sync.
  */
-val NORMALIZER_POINT_SIZE: Dp = 22.dp
+val NORMALIZER_POINT_SIZE: Dp = 30.dp
 
 /**
  * Creates an invisible line with [NORMALIZER_POINT_SIZE] transparent points.
@@ -415,15 +423,23 @@ val TriangleShape: Shape = GenericShape { size, _ ->
 /**
  * Inverted triangle shape pointing downward (flat base at top, apex at bottom).
  *
- * Used for a manual bolus on the BG and IOB graphs, and for carbs on the COB graph. The apex
- * sits at the data point's y-coordinate with the base above it, so it points at the value.
+ * Used for a manual bolus on the BG and IOB graphs, and for carbs on the COB graph. The apex sits at the data point's
+ * y-coordinate with the base above it, so it points at the value.
  */
-val InvertedTriangleShape: Shape = GenericShape { size, _ ->
-    val baseHalf = size.width * 0.3f         // Narrow base for sharper triangle
+val InvertedTriangleShape: Shape = invertedTriangleShape()
+
+/**
+ * [InvertedTriangleShape] with its apex [tipInset] of the box above the box centre, so the tip
+ * stops short of the data point. The base is narrowed by the same share: in a box grown by twice
+ * the inset the triangle keeps the proportions of the plain shape and only moves away from the
+ * point. The BG graph uses it to keep a marker's tip outside the reading dot.
+ */
+fun invertedTriangleShape(tipInset: Float = 0f): Shape = GenericShape { size, _ ->
+    val baseHalf = size.width * 0.3f * (1f - 2f * tipInset)   // Narrow base for sharper triangle
     val cx = size.width / 2f
-    moveTo(cx - baseHalf, 0f)               // Top left (base)
-    lineTo(cx + baseHalf, 0f)               // Top right (base)
-    lineTo(cx, size.height / 2f)            // Bottom center (apex)
+    moveTo(cx - baseHalf, 0f)                                 // Top left (base)
+    lineTo(cx + baseHalf, 0f)                                 // Top right (base)
+    lineTo(cx, size.height * (0.5f - tipInset))               // Bottom center (apex)
     close()
 }
 
@@ -438,18 +454,21 @@ val InvertedTriangleShape: Shape = GenericShape { size, _ ->
  * it from below, so both tips meet at the moment on the curve.
  * Same proportions as the other two.
  */
-val TriangleBelowShape: Shape = GenericShape { size, _ ->
-    val baseHalf = size.width * 0.3f         // Narrow base for sharper triangle
+val TriangleBelowShape: Shape = triangleBelowShape()
+
+/** [TriangleBelowShape] with its apex [tipInset] of the box below the box centre, see [invertedTriangleShape]. */
+fun triangleBelowShape(tipInset: Float = 0f): Shape = GenericShape { size, _ ->
+    val baseHalf = size.width * 0.3f * (1f - 2f * tipInset)   // Narrow base for sharper triangle
     val cx = size.width / 2f
-    moveTo(cx, size.height / 2f)             // Top center (apex), at the data point
-    lineTo(cx + baseHalf, size.height)       // Right base
-    lineTo(cx - baseHalf, size.height)       // Left base
+    moveTo(cx, size.height * (0.5f + tipInset))               // Top center (apex), at the data point
+    lineTo(cx + baseHalf, size.height)                        // Right base
+    lineTo(cx - baseHalf, size.height)                        // Left base
     close()
 }
 
 /**
  * Size of a treatment marker (manual bolus, carbs) per [MarkerTier], the same on every graph.
- * The largest must stay within [NORMALIZER_POINT_SIZE].
+ * The largest, with the BG graph's tip gap added on both sides, must stay within [NORMALIZER_POINT_SIZE].
  */
 internal val MarkerTier.markerSize: Dp
     get() = when (this) {
@@ -704,6 +723,26 @@ fun niceScale(min: Double, max: Double): NiceScale {
     return NiceScale(floorToGrid(min, grid), ceilToGrid(safeMax, grid))
 }
 
+/**
+ * How far above the real data a predicted curve may pull the top of the BG axis, in mg/dl.
+ * Converted to the user's units where it is used.
+ */
+const val PREDICTION_AXIS_HEADROOM_MGDL = 54.0
+
+/**
+ * The value the top of the BG axis is fitted to. A real value ([realMax]: readings, calibrations,
+ * BG checks) widens the axis freely, and so does [highMark]. A predicted value ([predictionMax])
+ * counts only up to [headroom] above the higher of those two: a COB curve that runs off towards
+ * 20 mmol/L used to pull the axis up to 20 and press the real readings together at the bottom of
+ * the graph. Above the cap the curve is clipped at the top edge, which still shows that it is
+ * heading there. Downwards there is no cap, a predicted low must stay in view.
+ */
+fun bgAxisTop(realMax: Double?, predictionMax: Double?, highMark: Double, headroom: Double): Double {
+    val realTop = maxOf(realMax ?: highMark, highMark)
+    val predictionTop = predictionMax?.coerceAtMost(realTop + headroom) ?: realTop
+    return maxOf(realTop, predictionTop)
+}
+
 /** Rounds [value] up to [boundGrid] of itself, for a lone bound. 0 for a value that is not positive. */
 fun niceUp(value: Double): Double {
     if (value <= 0.0) return 0.0
@@ -732,19 +771,11 @@ fun niceScaleAroundPivot(min: Double, max: Double, pivot: Double, minDeviation: 
 }
 
 /**
- * Series that are 0-floored by default (see [zeroFloorNiceRange]): mostly-positive, allowing a
- * disparity-aware negative excursion without ever centering zero. IOB follows the same rule but
- * isn't included here — its basal-overlay combo graph has its own dedicated range computation
- * (SecondaryGraphCompose's `primaryDataNiceRange`) that calls [zeroFloorNiceRange] directly.
- */
-val ZERO_FLOOR_SERIES_TYPES = setOf(SeriesType.BGI, SeriesType.DEVIATIONS, SeriesType.ACTIVITY, SeriesType.STEPS, SeriesType.ABS_IOB)
-
-/**
  * Zero-floor axis range, disparity-aware. When the negative excursion is tiny next to the
  * positive side (ratio >= [disparityRatio]), the two sides are rounded each on its own, so the
  * negative part stays a thin sliver instead of being rounded out to the grid of the whole range.
  * When the two sides are comparable, both are rounded on one grid.
- * Used for IOB and [ZERO_FLOOR_SERIES_TYPES].
+ * Used by [AxisRule.ZeroFloor].
  */
 fun zeroFloorNiceRange(dataMin: Double, dataMax: Double, disparityRatio: Double = 10.0): NiceScale {
     if (dataMin >= 0.0) return niceScale(0.0, dataMax)
@@ -807,7 +838,7 @@ internal fun niceAxisLabelValues(
  * from Vico's own step placer.
  *
  * [labelMin] and [labelMax] keep labels off a part of the axis the series does not reach: the IOB
- * axis goes on above IOB to leave room for basal (see `iobBasalScale`), and a zero-aligned axis can
+ * axis goes on above IOB to leave room for basal (see [graphAxes]), and a zero-aligned axis can
  * reach below the series' own floor, where a label would suggest a value it never has.
  *
  * A data class, so two placers with the same limits are equal and the graph does not redraw
@@ -828,6 +859,21 @@ internal data class NiceVerticalAxisItemPlacer(
         val range = context.ranges.getYRange(position)
         return niceAxisLabelValues(range.minY, range.maxY, axisHeight, maxLabelHeight, labelMin, labelMax)
     }
+}
+
+/**
+ * The labels of an axis whose series has no values: none, so an empty frame does not show a scale
+ * it does not have (next to a series on the other axis it was read as that one's scale). The axis
+ * is still measured with one label, so it keeps its width and the hour lines stay under those of
+ * the other graphs.
+ */
+internal object NoLabelsAxisItemPlacer : VerticalAxis.ItemPlacer by VerticalAxis.ItemPlacer.step() {
+
+    override fun getLabelValues(context: CartesianDrawingContext, axisHeight: Float, maxLabelHeight: Float, position: Axis.Position.Vertical): List<Double> =
+        emptyList()
+
+    override fun getWidthMeasurementLabelValues(context: CartesianMeasuringContext, axisHeight: Float, maxLabelHeight: Float, position: Axis.Position.Vertical): List<Double> =
+        listOf(0.0)
 }
 
 // =========================================================================

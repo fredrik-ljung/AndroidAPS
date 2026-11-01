@@ -209,8 +209,8 @@ class NSClientV3Plugin(
             when {
                 preferences.get(NsclientBooleanKey.NsPaused)                                          -> rh.gs(CoreUiStrings.paused)
                 isAllowed.not()                                                                       -> blockingReason
-                preferences.get(BooleanKey.NsClient3UseWs) && nsConnection.socketConnected == true  -> "WS: " + rh.gs(InterfacesStrings.connected)
-                preferences.get(BooleanKey.NsClient3UseWs) && nsConnection.socketConnected == false -> "WS: " + rh.gs(SyncStrings.not_connected)
+                preferences.get(BooleanKey.NsClient3UseWs) && nsConnection.socketConnected == true  -> rh.gs(InterfacesStrings.confirmation_line, "WS", rh.gs(InterfacesStrings.connected))
+                preferences.get(BooleanKey.NsClient3UseWs) && nsConnection.socketConnected == false -> rh.gs(InterfacesStrings.confirmation_line, "WS", rh.gs(SyncStrings.not_connected))
                 lastOperationError != null                                                            -> rh.gs(CoreUiStrings.error)
                 nsAndroidClient?.lastStatus == null                                                   -> rh.gs(SyncStrings.not_connected)
                 nsLoadExecutor.isRunning                                                                       -> rh.gs(SyncStrings.working)
@@ -234,6 +234,13 @@ class NSClientV3Plugin(
     internal var lastLoadedSrvModified = LastModified(LastModified.Collections()) // max srvLastModified timestamp of last fetched data for every collection
     internal var firstLoadContinueTimestamp = LastModified(LastModified.Collections()) // timestamp of last fetched data for every collection during initial load
     internal var initialLoadFinished = false
+
+    /**
+     * AAPSCLIENT: the newest srvModified of the device statuses loaded so far, see LoadDeviceStatusRunner. Not
+     * stored: after a start the client loads the last 48 hours again, so a database that lost its loop
+     * results gets them back.
+     */
+    internal var lastLoadedDeviceStatusSrvModified = 0L
 
 
     /**
@@ -735,6 +742,7 @@ class NSClientV3Plugin(
     override suspend fun resetToFullSync() {
         firstLoadContinueTimestamp = LastModified(LastModified.Collections())
         lastLoadedSrvModified = LastModified(LastModified.Collections())
+        lastLoadedDeviceStatusSrvModified = 0L
         initialLoadFinished = false
         storeLastLoadedSrvModified()
         dataSyncSelectorV3.resetToNextFullSync()

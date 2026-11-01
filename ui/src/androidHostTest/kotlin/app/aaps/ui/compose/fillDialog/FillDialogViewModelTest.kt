@@ -2,8 +2,10 @@ package app.aaps.ui.compose.fillDialog
 
 import androidx.lifecycle.SavedStateHandle
 import app.aaps.core.data.model.ICfg
+import app.aaps.core.data.model.TE
 import app.aaps.core.data.pump.defs.PumpDescription
 import app.aaps.core.data.ui.ConfirmationRole
+import app.aaps.core.interfaces.bolus.BatchAction
 import app.aaps.core.interfaces.bolus.BatchExecutor
 import app.aaps.core.interfaces.bolus.MasterActionExecutor
 import app.aaps.core.interfaces.clientcontrol.ActionProgress
@@ -19,6 +21,7 @@ import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.pump.Pump
 import app.aaps.core.interfaces.pump.PumpInsulin
 import app.aaps.core.interfaces.pump.PumpWithConcentration
+import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.TextResolver
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.Event
@@ -51,6 +54,7 @@ import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.atLeast
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
+import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 
@@ -72,6 +76,7 @@ internal class FillDialogViewModelTest {
     @Mock private lateinit var masterActionExecutor: MasterActionExecutor
     @Mock private lateinit var batchExecutor: BatchExecutor
     @Mock private lateinit var rxBus: RxBus
+    @Mock private lateinit var commandQueue: CommandQueue
 
     private val pump: PumpWithConcentration = mock()
     private val pumpDescription: PumpDescription = mock()
@@ -101,13 +106,15 @@ internal class FillDialogViewModelTest {
         whenever(insulinManager.insulins).thenReturn(arrayListOf<ICfg>())
         // observeConcentrationEnabled() builds a flow from preferences.observe(key) in init (collection deferred).
         whenever(preferences.observe(BooleanKey.GeneralInsulinConcentration)).thenReturn(MutableStateFlow(false))
+        whenever(dateUtil.now()).thenReturn(NOW)
+        whenever(commandQueue.smbBeingDelivered).thenReturn(MutableStateFlow(false))
         sut = buildSut()
     }
 
     private fun buildSut() = FillDialogViewModel(
         SavedStateHandle(), constraintChecker, activePlugin, persistenceLayer, preferences, config,
         decimalFormatter, rh, dateUtil, translator, aapsLogger, ch, insulinManager, profileFunction,
-        masterActionExecutor, batchExecutor, rxBus, CoroutineScope(UnconfinedTestDispatcher())
+        masterActionExecutor, batchExecutor, rxBus, CoroutineScope(UnconfinedTestDispatcher()), commandQueue
     )
 
     @AfterEach
@@ -172,6 +179,60 @@ internal class FillDialogViewModelTest {
         val seen = runCartridgeChangeWithInsulinSwitch(ActionProgress.Applied)
 
         assertThat(seen).isEmpty()
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // One batch, so a client makes one round trip (#5416)
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * A client runs one round trip at a time and refuses a second one at once as Busy. With one batch per ticked
+     * item only one of them reached the master, and a lost site change was not even reported.
+     */
+    @Test
+    fun `everything ticked goes to the master in one batch`() = runTest {
+        whenever(batchExecutor.prepare(any(), any(), any())).thenReturn(ActionProgress.Applied)
+        val fiasp = ICfg(insulinLabel = "Fiasp", insulinEndTime = 480, insulinPeakTime = 55, concentration = 1.0)
+
+        sut.selectInsulin(fiasp)
+        sut.updateSiteChange(true)
+        sut.updateCartridgeChange(true)
+        sut.buildConfirmationSummary()
+        sut.confirmAndSave()
+
+        val batch = argumentCaptor<List<BatchAction>>()
+        verify(batchExecutor, times(1)).prepare(batch.capture(), any(), any())
+        assertThat(batch.firstValue.filterIsInstance<BatchAction.TherapyEvent>().map { it.teType })
+            .containsExactly(TE.Type.CANNULA_CHANGE, TE.Type.INSULIN_CHANGE)
+        assertThat(batch.firstValue.filterIsInstance<BatchAction.InsulinActivate>().map { it.iCfg }).containsExactly(fiasp)
+    }
+
+    /**
+     * On a client the app's round-trip modal shows the master's answer, with the master's own reason. The dialog
+     * used to add a second dialog with a less exact text.
+     */
+    @Test
+    fun `on a client the master's answer is shown once, by the modal`() = runTest {
+        whenever(config.AAPSCLIENT).thenReturn(true)
+
+        assertThat(runCartridgeChangeWithInsulinSwitch(ActionProgress.Rejected(FailureReason.NotAllowedForRole, "role"))).isEmpty()
+    }
+
+    @Test
+    fun `on a client an unconfirmed switch is shown once, by the modal`() = runTest {
+        whenever(config.AAPSCLIENT).thenReturn(true)
+
+        assertThat(runCartridgeChangeWithInsulinSwitch(ActionProgress.Unconfirmed(FailureReason.NoReply, "timeout"))).isEmpty()
+    }
+
+    /** Nothing was sent, so there was no modal: the dialog says it itself. */
+    @Test
+    fun `on a client a master that cannot be reached is still reported`() = runTest {
+        whenever(config.AAPSCLIENT).thenReturn(true)
+
+        val seen = runCartridgeChangeWithInsulinSwitch(ActionProgress.Rejected(FailureReason.NotReachable, "offline"))
+
+        assertThat(seen).contains("The insulin was not switched: The master is offline. Your previous insulin is still in use.")
     }
 
     /**
@@ -310,5 +371,63 @@ internal class FillDialogViewModelTest {
 
         assertThat(sut.uiState.value.eventTime).isEqualTo(123_456L)
         assertThat(sut.uiState.value.eventTimeChanged).isTrue()
+    }
+
+    @Test
+    fun `the dialog opens at now, with no offset`() {
+        assertThat(sut.uiState.value.eventTime).isEqualTo(NOW)
+        assertThat(sut.uiState.value.timeOffsetMinutes).isEqualTo(0)
+        assertThat(sut.uiState.value.eventTimeChanged).isFalse()
+    }
+
+    /** The -/+ buttons, the same as in the bolus wizard, the carbs and the insulin dialog (#5353). */
+    @Test
+    fun `the minus and plus buttons move the time in minutes from now`() {
+        sut.updateTimeOffset(-5)
+        assertThat(sut.uiState.value.eventTime).isEqualTo(NOW - 5 * MINUTE)
+        assertThat(sut.uiState.value.eventTimeChanged).isTrue()
+
+        sut.updateTimeOffset(0)
+        assertThat(sut.uiState.value.eventTime).isEqualTo(NOW)
+        assertThat(sut.uiState.value.eventTimeChanged).isFalse()
+    }
+
+    @Test
+    fun `the buttons stop at a week back and half a day ahead`() {
+        sut.updateTimeOffset(-8 * 24 * 60)
+        assertThat(sut.uiState.value.timeOffsetMinutes).isEqualTo(-7 * 24 * 60)
+        assertThat(sut.uiState.value.eventTime).isEqualTo(NOW - 7 * 24 * 60 * MINUTE)
+
+        sut.updateTimeOffset(13 * 60)
+        assertThat(sut.uiState.value.timeOffsetMinutes).isEqualTo(12 * 60)
+    }
+
+    @Test
+    fun `a picked time sets the offset, so the buttons go on from it`() {
+        sut.updateEventTime(NOW - 37 * MINUTE)
+        assertThat(sut.uiState.value.timeOffsetMinutes).isEqualTo(-37)
+
+        sut.updateTimeOffset(sut.uiState.value.timeOffsetMinutes - 5)
+        assertThat(sut.uiState.value.eventTime).isEqualTo(NOW - 42 * MINUTE)
+    }
+
+    /** The insulin choice is offered only for a change made now. A time moved with the buttons is a changed time too. */
+    @Test
+    fun `a time moved with the buttons hides the insulin choice`() {
+        val atNow = FillDialogUiState(
+            insulinCartridgeChange = true,
+            availableInsulins = listOf<ICfg>(mock(), mock()),
+            eventTime = NOW,
+            eventTimeOriginal = NOW
+        )
+
+        assertThat(atNow.showInsulinChange).isTrue()
+        assertThat(atNow.copy(eventTime = NOW - 5 * MINUTE, timeOffsetMinutes = -5).showInsulinChange).isFalse()
+    }
+
+    private companion object {
+
+        const val NOW = 1_700_000_000_000L
+        const val MINUTE = 60_000L
     }
 }
