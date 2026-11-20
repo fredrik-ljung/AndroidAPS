@@ -4,6 +4,7 @@ import app.aaps.core.data.aps.SMBDefaults
 import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.model.CA
 import app.aaps.core.data.model.TE
+import app.aaps.core.data.time.SystemTimeZone
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.aps.AutosensData
 import app.aaps.core.interfaces.aps.AutosensDataStore
@@ -53,7 +54,6 @@ import dev.zacsweers.metro.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import kotlin.math.abs
 import kotlin.math.max
@@ -109,6 +109,9 @@ class PrepareGraphDataRunner(
             data.iobCobCalculator.bgDataReloaded()
         }
         if (isStopped()) return WorkOutcome.Stopped
+
+        // Before anything is picked with the window: the post pass moves it on only at the end of the run (#5614).
+        if (data.liveWindow) data.overviewData.moveLiveWindowTo(Instant.fromEpochMilliseconds(dateUtil.now()), SystemTimeZone.current())
 
         // ===== Phase 2: Bucketed data → cache (was PrepareBucketedDataWorker) =====
         prepareBucketedData(data)
@@ -477,7 +480,7 @@ class PrepareGraphDataRunner(
 
                 // add one neutral deviation every 2 hours to help decay over long exclusion periods
                 // Local wall clock, exactly what GregorianCalendar read before.
-                val local = Instant.fromEpochMilliseconds(bgTime).toLocalDateTime(TimeZone.currentSystemDefault())
+                val local = Instant.fromEpochMilliseconds(bgTime).toLocalDateTime(SystemTimeZone.current())
                 val minute = local.minute
                 val hours = local.hour
                 if (minute in 0..4 && hours % 2 == 0) autosensData.extraDeviation.add(0.0)
